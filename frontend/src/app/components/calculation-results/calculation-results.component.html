@@ -1,0 +1,154 @@
+<div class="metrics-grid sales-metrics">
+  <div class="metric">
+    <span>Total Sales Amount</span
+    ><strong>{{ result.summary.sales | currency: 'PHP' : 'symbol' : '1.2-2' }}</strong
+    ><small>Validated rows with matched cards</small>
+  </div>
+  <div class="metric fee-metric">
+    <span>Total Bank Charges</span
+    ><strong>{{ result.summary.charges | currency: 'PHP' : 'symbol' : '1.2-2' }}</strong
+    ><small>Positive charges</small>
+  </div>
+  <div class="metric">
+    <span>Total Subsidies</span
+    ><strong>{{ result.summary.subsidies | currency: 'PHP' : 'symbol' : '1.2-2' }}</strong
+    ><small>Shown as negative adjustments per item</small>
+  </div>
+  <div class="metric">
+    <span>Total Gross Margin</span
+    ><strong>{{ result.summary.grossMargin | currency: 'PHP' : 'symbol' : '1.2-2' }}</strong
+    ><small
+      >{{ result.summary.marginCalculatedItems | number }} items with known cost and charges</small
+    >
+  </div>
+  <div class="metric">
+    <span>Total Processed Items</span><strong>{{ result.summary.processedItems | number }}</strong
+    ><small>One row per source product</small>
+  </div>
+  <div class="metric">
+    <span>Needs Review Count</span><strong>{{ result.summary.reviewCount | number }}</strong
+    ><small>Includes missing-identifier warnings</small>
+  </div>
+</div>
+<div class="source-audit">
+  <strong
+    >Sales dates: {{ result.reportDates.join(', ') || 'No valid date found' }} (YYYY-MM-DD)</strong
+  >
+  <p>
+    {{ result.summary.processedItems | number }} original sales rows retained ·
+    {{ result.summary.feeCalculatedItems | number }} items with calculated charges ·
+    {{ result.summary.missingProductIds | number }} missing Product IDs.
+  </p>
+  <p>
+    Only rows with a matched configured card in Tender are calculated. Cash-only and SBC QRPH-only
+    rows retain their source values; Applied Bank Rate, Bank Charges / Subsidy and GrossMargin stay
+    blank. Confirmed totals include only validated amounts. A known bank fee is retained when cost
+    is missing; its gross margin remains blank. Product ID warnings do not discard valid
+    calculations.
+    @if (result.summary.partialCalculationItems) {
+      {{ result.summary.partialCalculationItems | number }} rows show charges for matched payment
+      methods and provisional gross margins; they are excluded from confirmed totals until the
+      remaining methods are configured.
+    }
+  </p>
+</div>
+<div class="result-status" [class.has-reviews]="result.summary.reviewCount > 0">
+  <span>{{
+    result.summary.reviewCount
+      ? 'Review flagged rows before using this report.'
+      : 'All source rows processed.'
+  }}</span>
+  <button mat-flat-button (click)="downloadReport.emit()" [disabled]="downloading">
+    {{ downloading ? 'Preparing workbook…' : '↓ Download Calculated Excel Report' }}
+  </button>
+</div>
+<mat-tab-group animationDuration="0ms" (selectedIndexChange)="changeView($event)">
+  <mat-tab [label]="'Item Bank Deductions (' + result.items.length + ')'"></mat-tab>
+  <mat-tab label="Bank & Branch Summary"></mat-tab>
+  <mat-tab [label]="'Needs Review (' + result.reviews.length + ')'"></mat-tab>
+</mat-tab-group>
+<div class="tab-toolbar">
+  <label class="search-label"
+    ><span aria-hidden="true">⌕</span
+    ><input
+      type="search"
+      aria-label="Search results"
+      placeholder="Search products, IDs, invoices…"
+      [formControl]="search" /></label
+  ><span class="subtle">{{ filtered.length | number }} rows · Click a column to sort</span>
+</div>
+<div class="table-scroll results-scroll">
+  <table aria-label="Calculated Sales Report">
+    <thead>
+      <tr>
+        @for (col of columns; track col.key) {
+          <th
+            [attr.aria-sort]="
+              sortKey === col.key ? (ascending ? 'ascending' : 'descending') : 'none'
+            "
+          >
+            <button class="column-sort" (click)="sort(col.key)">
+              {{ col.header }} {{ sortKey === col.key ? (ascending ? '↑' : '↓') : '' }}
+            </button>
+          </th>
+        }
+      </tr>
+    </thead>
+    <tbody>
+      @for (row of visibleRows; track $index) {
+        <tr [class.review-row]="needsReview(row)">
+          @for (col of columns; track col.key) {
+            <td
+              [class.numeric]="['money', 'number', 'percent'].includes(col.format)"
+              [class.reason-cell]="
+                ['explanation', 'reason', 'originalPaymentMethod'].includes(col.key)
+              "
+              [attr.title]="display(row[col.key])"
+            >
+              @if (col.format === 'date') {
+                {{ calendarDate(row[col.key]) }}
+              } @else if (col.format === 'money' && numeric(row[col.key]) !== null) {
+                {{ numeric(row[col.key]) | currency: 'PHP' : 'symbol' : '1.2-2' }}
+              } @else if (col.format === 'percent' && numeric(row[col.key]) !== null) {
+                {{ row[col.key] }}%
+              } @else if (col.key === 'status') {
+                <span class="status-pill" [class.warning]="needsReview(row)">{{
+                  display(row[col.key])
+                }}</span>
+                @if (warning(row)) {
+                  <small class="identifier-warning" [attr.title]="warning(row)"
+                    >⚠ {{ warning(row) }}</small
+                  >
+                }
+              } @else {
+                {{ display(row[col.key]) }}
+              }
+            </td>
+          }
+        </tr>
+      }
+      @if (!filtered.length) {
+        <tr>
+          <td [attr.colspan]="columns.length" class="empty-table">No matching rows.</td>
+        </tr>
+      }
+    </tbody>
+  </table>
+</div>
+<div class="pagination">
+  <span
+    >{{ result.items.length | number }} source products · Calculated
+    {{ result.calculatedAt | date: 'medium' : '+0800' }}</span
+  >
+  <div>
+    <button mat-button [disabled]="page === 0" (click)="page = page - 1">Previous</button
+    ><span>{{ page + 1 }} / {{ pages }}</span
+    ><button mat-button [disabled]="page + 1 >= pages" (click)="page = page + 1">Next</button>
+  </div>
+</div>
+<p class="table-footnote">
+  The main worksheet contains 17 columns, starting with Product ID. Payment copies the source text;
+  Tender shows the matched configured card name. Prices, costs, discounts and final net line totals
+  come from the Sales Report. Positive adjustments are charges; negative adjustments are subsidies.
+  Editing exported settings requires reimport and recalculation.
+</p>

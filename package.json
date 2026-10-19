@@ -1,0 +1,25 @@
+{
+  "name": "bank-rate-calculator",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "start": "concurrently -k -n API,WEB \"npm run start -w backend\" \"npm run start -w frontend\"",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "test": "npm run test -w backend",
+    "test:e2e": "playwright test",
+    "test:sample": "npm run test:sample -w backend --",
+    "format": "prettier --write frontend/src backend/src backend/test shared e2e playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "concurrently": "^9.2.0",
+    "prettier": "^3.9.10"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

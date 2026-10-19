@@ -1,0 +1,171 @@
+<div class="app-shell">
+  <aside class="sidebar">
+    <a class="brand" href="#"
+      ><span class="brand-mark"
+        ><svg viewBox="0 0 28 28" fill="none" aria-hidden="true">
+          <path
+            d="M5 6h18v16H5zM9 3v22M5 11h18M5 17h18"
+            stroke="currentColor"
+            stroke-width="1.7"
+          /></svg></span
+      >ledger<span class="brand-dot">.</span></a
+    >
+    <div class="workspace-label">ACCOUNTING WORKSPACE</div>
+    <nav aria-label="Main navigation">
+      <a class="nav-current" href="#uploads"
+        ><span aria-hidden="true">▦</span> Bank rate calculator</a
+      ><a href="#configuration"><span aria-hidden="true">⚙</span> Configuration settings</a
+      ><a href="#results"><span aria-hidden="true">▤</span> Calculation results</a>
+    </nav>
+    <div class="sidebar-note">
+      <span class="local-dot"></span> Local workspace
+      <p>Your reports stay in this session.<br />No database. No cloud storage.</p>
+    </div>
+    <div class="sidebar-footer">
+      EXCEL IN. CLARITY OUT.<br /><span>Bank deduction workspace</span>
+    </div>
+  </aside>
+  <div class="main-shell">
+    <header class="topbar">
+      <div>
+        <span class="breadcrumb">Workspace</span><span class="breadcrumb-separator">/</span
+        ><strong>Bank rate calculator</strong>
+      </div>
+      <span class="session-badge"><span class="local-dot"></span> Local session</span>
+    </header>
+    <main>
+      <div class="page-heading">
+        <div>
+          <div class="eyebrow">REPORT PROCESSING</div>
+          <h1>Bank rate deduction calculator</h1>
+          <p>Calculate product bank charges, subsidies and gross margins from one Sales Report.</p>
+        </div>
+        <div class="excel-badge"><span>▤</span> Excel to Excel</div>
+      </div>
+      <div class="workflow-strip">
+        <a href="#uploads"><span>1</span>Upload Sales Report</a><i></i
+        ><a href="#configuration"><span>2</span>Review rates</a><i></i
+        ><a href="#calculate"><span>3</span>Calculate</a><i></i
+        ><a href="#results"><span>4</span>Download Excel</a>
+      </div>
+      @if (error()) {
+        <div class="page-alert error-message" role="alert">
+          <strong>Unable to complete the request.</strong> {{ error()
+          }}<button class="delete-button" aria-label="Dismiss error" (click)="error.set('')">
+            ×
+          </button>
+        </div>
+      }
+      @if (notice()) {
+        <div class="notice" role="status">{{ notice() }}</div>
+      }
+      <section class="section-card" id="uploads">
+        <div class="section-heading">
+          <div class="section-number">01</div>
+          <div>
+            <h2>Upload Sales Report</h2>
+            <p>Select the worksheet containing your products, costs and payment details.</p>
+          </div>
+          <span class="step-tag">STEP 1 OF 4</span>
+        </div>
+        <div class="upload-grid sales-only">
+          <app-excel-upload (reportChange)="setReport($event)"></app-excel-upload>
+        </div>
+        <div class="info-line">
+          <span aria-hidden="true">ⓘ</span> One result per original product row. Product IDs and
+          invoice references retain their source text and leading zeros.
+        </div>
+      </section>
+      <section class="section-card" id="configuration">
+        <div class="section-heading">
+          <div class="section-number">02</div>
+          <div>
+            <h2>Configuration settings</h2>
+            <p>Review your bank rates and reference lists before calculating.</p>
+          </div>
+          <span class="session-tag">EDITABLE FOR THIS SESSION</span>
+        </div>
+        @if (loadingDefaults()) {
+          <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+          <p class="loading-label">Loading local default rates…</p>
+        } @else if (configSeed()) {
+          <app-configuration
+            [initialConfiguration]="configSeed()"
+            [busy]="configBusy()"
+            (configurationChange)="setConfig($event)"
+            (importFile)="importConfig($event)"
+            (exportSettings)="exportConfig()"
+            (resetSettings)="loadDefaults()"
+          ></app-configuration>
+        } @else {
+          <div class="empty-state">
+            <p>Default settings could not be loaded.</p>
+            <button mat-stroked-button (click)="loadDefaults()">Retry connection</button>
+          </div>
+        }
+      </section>
+      <section class="calculate-card" id="calculate">
+        <div>
+          <div class="eyebrow">03 · RUN CALCULATION</div>
+          <h2>Ready to calculate product margins?</h2>
+          <p>
+            {{
+              ready
+                ? 'Your Sales Report and settings are ready. Calculate charges and gross margins for every item.'
+                : 'Upload your Sales Report, confirm column mappings and cost basis, and review the rates.'
+            }}
+          </p>
+          <div class="readiness">
+            <span [class.ready]="sales?.valid">{{ sales?.valid ? '✓' : '○' }} Sales report</span
+            ><span [class.ready]="configValid">{{ configValid ? '✓' : '○' }} Rate settings</span>
+          </div>
+        </div>
+        <button mat-flat-button class="calculate-button" [disabled]="!ready" (click)="calculate()">
+          {{ busy() ? 'Calculating…' : 'Calculate Bank Rate Deductions' }}
+          <span aria-hidden="true">→</span>
+        </button>
+      </section>
+      @if (busy()) {
+        <mat-progress-bar
+          mode="indeterminate"
+          aria-label="Calculating bank deductions"
+        ></mat-progress-bar>
+      }
+      <section class="section-card" id="results">
+        <div class="section-heading">
+          <div class="section-number">04</div>
+          <div>
+            <h2>Results & download</h2>
+            <p>Item charges, gross margins and source records that need your attention.</p>
+          </div>
+          @if (response()) {
+            <span class="complete-tag">✓ CALCULATED</span>
+          }
+        </div>
+        @if (response(); as calculation) {
+          <app-calculation-results
+            [calculation]="calculation.result"
+            [downloading]="downloading()"
+            (downloadReport)="download()"
+          ></app-calculation-results>
+        } @else {
+          <div class="empty-state">
+            <div class="empty-icon" aria-hidden="true">▤</div>
+            <h3>Your calculated report will appear here</h3>
+            <p>
+              Upload your Sales Report and calculate to preview all 17 output columns<br />and
+              download one formatted, four-sheet Excel workbook.
+            </p>
+            <span class="empty-caption"
+              >PRODUCT ID · ITEM DEDUCTIONS · SUMMARY · SETTINGS · REVIEW</span
+            >
+          </div>
+        }
+      </section>
+      <footer class="page-footer">
+        <span>Ledger · Bank Rate Calculator</span
+        ><span>PHP currency · Centavo reconciliation · Session-only processing</span>
+      </footer>
+    </main>
+  </div>
+</div>

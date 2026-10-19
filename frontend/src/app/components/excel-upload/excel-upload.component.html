@@ -1,0 +1,132 @@
+<div class="upload-panel">
+  <div class="upload-label">
+    <span class="file-glyph" aria-hidden="true">↥</span>
+    <div>
+      <h3>{{ title }}</h3>
+      <p>Product IDs, costs, sales amounts and payment details</p>
+    </div>
+    <span class="required-label">REQUIRED</span>
+  </div>
+  <div class="drop-area" (dragover)="$event.preventDefault()" (drop)="drop($event)">
+    <input
+      #fileInput
+      type="file"
+      accept=".xlsx,.xls"
+      class="sr-only"
+      [attr.aria-label]="'Upload ' + title"
+      (change)="pick($event)"
+    />
+    <div class="upload-symbol" aria-hidden="true">▤</div>
+    <strong>{{ file?.name || 'Drop your Excel workbook here' }}</strong>
+    <p>.xlsx or .xls · up to 10 MB</p>
+    <button mat-stroked-button type="button" (click)="fileInput.click()" [disabled]="loading()">
+      {{ file ? 'Replace workbook' : 'Browse files' }}
+    </button>
+  </div>
+  @if (loading()) {
+    <mat-progress-bar mode="indeterminate" aria-label="Reading workbook"></mat-progress-bar>
+  }
+  @if (error()) {
+    <p class="error-message" role="alert">{{ error() }}</p>
+  }
+  @if (selected(); as sheet) {
+    <div class="sheet-picker">
+      <label
+        >Worksheet<select
+          aria-label="Worksheet"
+          [formControl]="sheetControl"
+          (change)="selectSheet(sheetControl.value)"
+        >
+          @for (s of workbook()!.sheets; track s.name) {
+            <option [value]="s.name">{{ s.name }}</option>
+          }
+        </select></label
+      >
+      <div class="records-badge">
+        <strong>{{ sheet.recordCount | number }}</strong> records
+      </div>
+    </div>
+    <div class="mapping-grid">
+      <label
+        >Cost basis<select [formControl]="costBasisControl" aria-label="Cost basis">
+          <option value="auto">Auto (detected: {{ sheet.suggestedCostBasis }})</option>
+          <option value="unit">Unit cost × quantity</option>
+          <option value="line">Total line cost (already extended)</option>
+        </select></label
+      >
+      <label
+        >Explicit payment amounts apply to<select
+          [formControl]="paymentScopeControl"
+          aria-label="Payment amount scope"
+        >
+          <option value="invoice">Whole invoice (repeated across products)</option>
+          <option value="line">This product line only</option>
+        </select></label
+      >
+    </div>
+    @if (!controls['productId']?.value) {
+      <p class="notice">
+        Product ID is not mapped. Identifiers will remain blank with a warning; select the correct
+        column below.
+      </p>
+    }
+    <details class="mapping" [open]="missing">
+      <summary>
+        {{ missing ? 'Map required columns to continue' : 'Column mapping detected' }}
+        <span>{{ sheet.headers.length }} columns</span>
+      </summary>
+      <div class="mapping-grid">
+        @for (field of fields; track field) {
+          <label
+            >{{ labels[field] }}{{ required.includes(field) ? ' *' : ''
+            }}<select
+              [formControl]="controls[field]"
+              [attr.aria-label]="labels[field] + (required.includes(field) ? ' *' : '')"
+            >
+              <option value="">
+                {{ required.includes(field) ? 'Select column…' : 'Not mapped' }}
+              </option>
+              @for (header of sheet.headers; track header) {
+                <option [value]="header">{{ header }}</option>
+              }
+            </select></label
+          >
+        }
+      </div>
+      <div class="header-row">
+        <label
+          >Header row<input type="number" min="1" max="50" [formControl]="headerControl" /></label
+        ><button mat-button (click)="reread()" [disabled]="loading()">Read this header row</button>
+      </div>
+    </details>
+    <details class="preview-details">
+      <summary>Preview first {{ sheet.preview.length }} records</summary>
+      <p class="subtle">
+        Recognized dates are displayed as YYYY-MM-DD. Text dates use MM/DD/YYYY; 10/01/2026 is
+        October 1, 2026.
+      </p>
+      <div class="table-scroll preview-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Source row</th>
+              @for (h of sheet.headers; track h) {
+                <th>{{ h }}</th>
+              }
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of sheet.preview; track row.sourceRow) {
+              <tr>
+                <td>{{ row.sourceRow }}</td>
+                @for (cell of row.cells; track $index) {
+                  <td>{{ cell }}</td>
+                }
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    </details>
+  }
+</div>

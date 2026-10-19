@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.angular/
+.npm-cache/
+test-results/
+playwright-report/
+*.tsbuildinfo
+*.xlsx
+*.xls
+.env
+.env.*
+!.env.example
+*.log

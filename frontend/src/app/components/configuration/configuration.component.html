@@ -1,0 +1,183 @@
+<div class="config-toolbar">
+  <div class="subtle">
+    Rates apply to this calculation session. Positive rates are charges; negative rates are
+    subsidies. BNPL/SNPL variants require explicit configuration.
+  </div>
+  <div class="button-row">
+    <input
+      #importInput
+      type="file"
+      class="sr-only"
+      accept=".xlsx,.xls"
+      aria-label="Import configuration workbook"
+      (change)="pick($event)"
+    /><button mat-button (click)="importInput.click()" [disabled]="busy">↥ Import Excel</button
+    ><button mat-button (click)="exportSettings.emit()" [disabled]="busy || form.invalid">
+      ↧ Export settings</button
+    ><button mat-button class="muted-button" (click)="resetSettings.emit()" [disabled]="busy">
+      Reset defaults
+    </button>
+  </div>
+</div>
+<form [formGroup]="form" (submit)="$event.preventDefault()">
+  <mat-tab-group animationDuration="0ms">
+    <mat-tab [label]="'Payment methods (' + methods.length + ')'">
+      <div class="tab-toolbar">
+        <label class="search-label"
+          ><span aria-hidden="true">⌕</span
+          ><input
+            type="search"
+            placeholder="Search bank or card name…"
+            aria-label="Search payment methods"
+            [formControl]="search" /></label
+        ><button mat-stroked-button type="button" (click)="addMethod()">
+          + Add payment method
+        </button>
+      </div>
+      <div class="table-scroll config-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Bank</th>
+              <th>Card name / payment method</th>
+              <th class="rate-header">Rate (%)</th>
+              <th class="action-cell">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of filtered; track row.group) {
+              <tr [formGroup]="row.group">
+                <td>
+                  <select formControlName="bank" aria-label="Bank">
+                    @for (bank of bankNames; track $index) {
+                      <option [value]="bank">{{ bank }}</option>
+                    }
+                  </select>
+                </td>
+                <td>
+                  <input
+                    formControlName="cardName"
+                    aria-label="Card name"
+                    placeholder="Payment method name"
+                  />
+                </td>
+                <td>
+                  <div class="rate-input">
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="-100"
+                      max="100"
+                      formControlName="rate"
+                      aria-label="Rate percentage"
+                    /><span>%</span>
+                  </div>
+                </td>
+                <td class="action-cell">
+                  <button
+                    type="button"
+                    class="delete-button"
+                    [attr.aria-label]="'Remove ' + row.group.value.cardName"
+                    (click)="methods.removeAt(row.index)"
+                  >
+                    ×
+                  </button>
+                </td>
+              </tr>
+            }
+            @if (!filtered.length) {
+              <tr>
+                <td colspan="4" class="empty-table">No payment methods found.</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+      <p class="table-footnote">
+        {{ filtered.length }} of {{ methods.length }} methods · Enter percentages, for example 3.50
+        for 3.50%.
+      </p>
+    </mat-tab>
+    <mat-tab label="Banks & branches"
+      ><div class="reference-grid">
+        <label
+          >Bank reference list<textarea formControlName="banks" rows="12"></textarea
+          ><small>One bank per line. A payment method selects its bank explicitly.</small></label
+        ><label
+          >Branch reference list<textarea formControlName="branches" rows="12"></textarea
+          ><small
+            >Add or remove names, one branch per line. Source branch names are preserved.</small
+          ></label
+        ><label
+          >Methods with no bank charge<textarea formControlName="nonCard" rows="12"></textarea
+          ><small
+            >Exact names, one per line. Cash and SBC QRPH are excluded from bank charges by default.
+            Their amounts still count toward the invoice payment total. Rows with only these methods
+            have blank rate, bank charge and gross margin unless a configured card also
+            matches.</small
+          ></label
+        >
+      </div></mat-tab
+    >
+    <mat-tab label="Aliases & patterns"
+      ><div class="aliases-panel">
+        <p class="subtle">
+          Aliases match complete method names. Patterns match the complete name and support
+          <code>*</code> as a wildcard. BNPL/SNPL and promotional variants require an explicit
+          method, alias or promotional pattern.
+        </p>
+        <h3>Payment-method aliases</h3>
+        @for (row of aliases.controls; track row) {
+          <div class="alias-row" [formGroup]="row">
+            <input
+              formControlName="alias"
+              aria-label="Alias"
+              placeholder="Alternative payment name"
+            /><select formControlName="cardName" aria-label="Alias target card">
+              <option value="">Select card name</option>
+              @for (m of methods.controls; track m) {
+                <option [value]="m.value.cardName">{{ m.value.cardName }}</option>
+              }</select
+            ><button
+              type="button"
+              class="delete-button"
+              aria-label="Remove alias"
+              (click)="aliases.removeAt($index)"
+            >
+              ×
+            </button>
+          </div>
+        }
+        <button mat-stroked-button type="button" (click)="addAlias()">+ Add alias</button>
+        <h3 class="pattern-heading">Configured patterns</h3>
+        @for (row of patterns.controls; track row) {
+          <div class="alias-row" [formGroup]="row">
+            <input
+              formControlName="pattern"
+              aria-label="Pattern"
+              placeholder="Explicit pattern, e.g. CARD TERMINAL *"
+            /><select formControlName="cardName" aria-label="Pattern target card">
+              <option value="">Select card name</option>
+              @for (m of methods.controls; track m) {
+                <option [value]="m.value.cardName">{{ m.value.cardName }}</option>
+              }</select
+            ><button
+              type="button"
+              class="delete-button"
+              aria-label="Remove pattern"
+              (click)="patterns.removeAt($index)"
+            >
+              ×
+            </button>
+          </div>
+        }
+        <button mat-stroked-button type="button" (click)="addPattern()">+ Add pattern</button>
+      </div></mat-tab
+    >
+  </mat-tab-group>
+</form>
+@if (form.invalid) {
+  <p class="error-message" role="alert">
+    Complete all method names, banks, and rates. Rates must be between -100% and 100%.
+  </p>
+}
