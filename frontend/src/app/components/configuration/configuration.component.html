@@ -1,7 +1,8 @@
 <div class="config-toolbar">
   <div class="subtle">
     Rates apply to this calculation session. Positive rates are charges; negative rates are
-    subsidies. BNPL/SNPL variants require explicit configuration.
+    subsidies. BNPL/SNPL labels are ignored when matching the underlying payment method unless an
+    explicit configuration overrides it. Cash has no bank charge.
   </div>
   <div class="button-row">
     <input
@@ -111,10 +112,10 @@
         ><label
           >Methods with no bank charge<textarea formControlName="nonCard" rows="12"></textarea
           ><small
-            >Exact names, one per line. Cash and SBC QRPH are excluded from bank charges by default.
-            Their amounts still count toward the invoice payment total. Rows with only these methods
-            have blank rate, bank charge and gross margin unless a configured card also
-            matches.</small
+            >Exact names, one per line. Cash and Cash Payment always have zero bank deductions. SBC
+            QRPH is excluded by default. These amounts still count toward the payment total. Rows
+            without a configured card have blank rates and gross margins; other no-charge methods
+            also leave bank charges blank.</small
           ></label
         >
       </div></mat-tab
@@ -123,8 +124,9 @@
       ><div class="aliases-panel">
         <p class="subtle">
           Aliases match complete method names. Patterns match the complete name and support
-          <code>*</code> as a wildcard. BNPL/SNPL and promotional variants require an explicit
-          method, alias or promotional pattern.
+          <code>*</code> as a wildcard. BNPL/SNPL labels are ignored unless an explicit method,
+          alias or pattern matches them. Other promotional variants still require explicit
+          configuration.
         </p>
         <h3>Payment-method aliases</h3>
         @for (row of aliases.controls; track row) {

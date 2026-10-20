@@ -23,7 +23,7 @@
   </div>
   <div class="metric">
     <span>Total Processed Items</span><strong>{{ result.summary.processedItems | number }}</strong
-    ><small>One row per source product</small>
+    ><small>All uploaded source products</small>
   </div>
   <div class="metric">
     <span>Needs Review Count</span><strong>{{ result.summary.reviewCount | number }}</strong
@@ -35,16 +35,23 @@
     >Sales dates: {{ result.reportDates.join(', ') || 'No valid date found' }} (YYYY-MM-DD)</strong
   >
   <p>
-    {{ result.summary.processedItems | number }} original sales rows retained ·
+    {{ result.summary.processedItems | number }} source rows processed ·
+    {{ matchedItemCount | number }} matched items shown ·
+    {{ result.items.length - matchedItemCount | number }} items omitted from Item Bank Deductions ·
     {{ result.summary.feeCalculatedItems | number }} items with calculated charges ·
     {{ result.summary.missingProductIds | number }} missing Product IDs.
   </p>
   <p>
-    Only rows with a matched configured card in Tender are calculated. Cash-only and SBC QRPH-only
-    rows retain their source values; Applied Bank Rate, Bank Charges / Subsidy and GrossMargin stay
-    blank. Confirmed totals include only validated amounts. A known bank fee is retained when cost
-    is missing; its gross margin remains blank. Product ID warnings do not discard valid
-    calculations.
+    Item Bank Deductions shows only items with a matched configured bank payment in Tender.
+    Cash-only, other no-charge-only and unmatched items are omitted from this preview and Sheet 1.
+    Items with negative quantities are moved to Needs Review and excluded from all branch-and-date
+    totals. Missing or unconfigured payment details remain in Needs Review. BNPL/SNPL labels are
+    ignored during matching unless explicitly configured; original Payment text is preserved. Cost
+    shows total product cost: unit cost × quantity, or an already extended line cost. The original
+    cost is preserved in Calculation Explanation. Rows marked “Included in Sheet 2” contribute to
+    that summary; rows marked “Excluded from Sheet 2” do not. Confirmed totals include only
+    validated amounts. A known bank fee is retained when cost is missing; its gross margin remains
+    blank. Product ID warnings do not discard valid calculations.
     @if (result.summary.partialCalculationItems) {
       {{ result.summary.partialCalculationItems | number }} rows show charges for matched payment
       methods and provisional gross margins; they are excluded from confirmed totals until the
@@ -63,10 +70,21 @@
   </button>
 </div>
 <mat-tab-group animationDuration="0ms" (selectedIndexChange)="changeView($event)">
-  <mat-tab [label]="'Item Bank Deductions (' + result.items.length + ')'"></mat-tab>
-  <mat-tab label="Bank & Branch Summary"></mat-tab>
+  <mat-tab [label]="'Item Bank Deductions (' + matchedItemCount + ')'"></mat-tab>
+  <mat-tab [label]="branchDateSummarySheet"></mat-tab>
   <mat-tab [label]="'Needs Review (' + result.reviews.length + ')'"></mat-tab>
 </mat-tab-group>
+@if (view === 1) {
+  <h3>{{ branchDateSummaryTitle }}</h3>
+  <p class="table-footnote">
+    Totals use the same fully calculated product rows for sales, cost, signed charges/subsidies and
+    gross margin. Negative-quantity, cash-only, unmatched and provisional rows, and rows missing
+    cost, date or branch, are excluded. Review source details in the original Sales Report and
+    flagged items in Needs Review. Reconciled split payments retain the full product sales and cost
+    used in its gross margin. Total Cost / COGS equals the sum of Sheet 1 Cost for rows marked
+    “Included in Sheet 2”.
+  </p>
+}
 <div class="tab-toolbar">
   <label class="search-label"
     ><span aria-hidden="true">⌕</span
@@ -137,8 +155,8 @@
 </div>
 <div class="pagination">
   <span
-    >{{ result.items.length | number }} source products · Calculated
-    {{ result.calculatedAt | date: 'medium' : '+0800' }}</span
+    >{{ matchedItemCount | number }} matched items from {{ result.items.length | number }} source
+    products · Calculated {{ result.calculatedAt | date: 'medium' : '+0800' }}</span
   >
   <div>
     <button mat-button [disabled]="page === 0" (click)="page = page - 1">Previous</button
@@ -147,8 +165,9 @@
   </div>
 </div>
 <p class="table-footnote">
-  The main worksheet contains 17 columns, starting with Product ID. Payment copies the source text;
-  Tender shows the matched configured card name. Prices, costs, discounts and final net line totals
-  come from the Sales Report. Positive adjustments are charges; negative adjustments are subsidies.
-  Editing exported settings requires reimport and recalculation.
+  The main worksheet contains only matched items in 17 columns, starting with Product ID. Payment
+  copies the source text; Tender shows the matched configured card name. Prices, discounts and final
+  net line totals come from the Sales Report. Cost shows calculated total product cost; its source
+  value and basis remain in Calculation Explanation. Positive adjustments are charges; negative
+  adjustments are subsidies. Editing exported settings requires reimport and recalculation.
 </p>
