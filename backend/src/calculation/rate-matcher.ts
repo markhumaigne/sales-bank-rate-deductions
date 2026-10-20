@@ -1,7 +1,17 @@
 import { Configuration, PaymentMethod } from '../../../shared/models';
 import { normalize } from '../config/config.service';
-type RateMatch = { method?: PaymentMethod; nonCard?: boolean; reason?: string; note?: string };
+import defaults from '../config/bank-rates.json';
+type RateMatch = {
+  method?: PaymentMethod;
+  nonCard?: boolean;
+  cash?: boolean;
+  reason?: string;
+  note?: string;
+};
 const recognized = (value: string) => normalize(value).replace(/(\d)\s*(MOS|MONTHS?)\b/g, '$1 MOS');
+const withoutClassifications = (value: string) =>
+  normalize(value.replace(/\b(?:BNPL|SNPL)\b/g, ' '));
+const isCash = (value: string) => /^(?:CASH|CASH PAYMENT)$/.test(value);
 function glob(value: string, pattern: string): boolean {
   // Linear wildcard matching; user patterns are never executed as regular expressions.
   const p = normalize(pattern);
@@ -25,8 +35,54 @@ function glob(value: string, pattern: string): boolean {
   return pi === p.length;
 }
 
+export function withDefaultAliases(c: Configuration): Configuration {
+  const aliases = defaults.aliases.filter((alias) => {
+    // Older sessions and imported settings may predate a default alias. Reuse only
+    // an existing configured target; never copy its default rate or replace a user rule.
+    if (
+      !c.paymentMethods.some(
+        (method) => normalize(method.cardName) === normalize(alias.cardName),
+      ) ||
+      c.aliases.some((entry) => normalize(entry.alias) === normalize(alias.alias))
+    )
+      return false;
+    const explicit = matchRate(alias.alias, c);
+    return !explicit.method && !explicit.nonCard && !explicit.reason?.startsWith('Ambiguous');
+  });
+  return aliases.length ? { ...c, aliases: [...c.aliases, ...aliases] } : c;
+}
+
 export function matchRate(raw: string, c: Configuration, description = false): RateMatch {
   const value = normalize(raw);
+  const underlying = withoutClassifications(value);
+  // Cash cannot acquire a bank rate through an exact name, alias or broad wildcard.
+  if (isCash(underlying)) return { nonCard: true, cash: true };
+  if (/^CASH\s/.test(underlying))
+    return {
+      reason: 'Cash payment details are not a chargeable bank method; verify the payment amounts.',
+    };
+
+  // Honor explicitly configured BNPL/SNPL methods, aliases and patterns first.
+  // Ambiguous explicit settings must not silently fall back to a base rate.
+  let match = matchConfiguredRate(value, c, description);
+  if (
+    underlying !== value &&
+    !match.method &&
+    !match.nonCard &&
+    !match.reason?.startsWith('Ambiguous')
+  ) {
+    match = matchConfiguredRate(underlying, c, description);
+    if (match.method || match.nonCard)
+      match.note =
+        'Ignored BNPL/SNPL classification labels for payment matching; original text preserved. ' +
+        (match.note ?? '');
+  }
+  if (match.method && isCash(withoutClassifications(normalize(match.method.cardName))))
+    return { nonCard: true, cash: true };
+  return match;
+}
+
+function matchConfiguredRate(value: string, c: Configuration, description: boolean): RateMatch {
   const exact = c.paymentMethods.find((m) => normalize(m.cardName) === value);
   if (exact) return { method: exact };
   const alias = c.aliases.find((a) => normalize(a.alias) === value);
@@ -88,7 +144,7 @@ export function matchRate(raw: string, c: Configuration, description = false): R
   }
   return {
     reason: special
-      ? 'Unconfigured BNPL/SNPL or promotional method; add an exact method, alias, or explicit promotional pattern.'
+      ? 'Unconfigured promotional method; add an exact method, alias, or explicit promotional pattern.'
       : 'Unknown payment method or missing configured bank rate.',
   };
 }

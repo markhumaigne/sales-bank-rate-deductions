@@ -10,7 +10,12 @@ import { ConfigService } from '../src/config/config.service';
 import { ExcelService } from '../src/excel/excel.service';
 import { ExcelExportService } from '../src/excel/excel-export.service';
 import { CalculationService } from '../src/calculation/calculation.service';
-import { ITEM_COLUMNS } from '../../shared/models';
+import {
+  ITEM_COLUMNS,
+  BRANCH_DATE_SUMMARY_COLUMNS,
+  BRANCH_DATE_SUMMARY_SHEET,
+  BRANCH_DATE_SUMMARY_TITLE,
+} from '../../shared/models';
 import { upload } from './helpers';
 
 async function main() {
@@ -61,7 +66,7 @@ async function main() {
   if (cashRow?.originalPaymentMethod === 'Cash 27,100.00') {
     assert.equal(cashRow.cardName, '');
     assert.equal(cashRow.appliedRate, null);
-    assert.equal(cashRow.adjustment, null);
+    assert.equal(cashRow.adjustment, '0.00');
     assert.equal(cashRow.grossMargin, null);
     assert.doesNotMatch(cashRow.explanation, /Gross Margin =/);
   }
@@ -77,7 +82,7 @@ async function main() {
   assert.equal(
     sum(
       result.items
-        .filter((i) => i.adjustment !== null && !i.partialCalculation)
+        .filter((i) => i.cardName && i.adjustment !== null && !i.partialCalculation)
         .map((i) => i.lineTotal),
     ),
     result.summary.sales,
@@ -87,7 +92,10 @@ async function main() {
     assert.equal(item.originalPaymentMethod, sales[index].payment);
     if (!item.cardName) {
       assert.equal(item.appliedRate, null, 'No Tender means no calculated rate');
-      assert.equal(item.adjustment, null, 'No Tender means no calculated charge');
+      assert.ok(
+        item.adjustment === null || item.adjustment === '0.00',
+        'No Tender means no bank charge',
+      );
       assert.equal(item.grossMargin, null, 'No Tender means no calculated margin');
     }
     if (item.grossMargin !== null)
@@ -181,17 +189,25 @@ async function main() {
       if (!row.payments.length) continue;
       let independentFee = new Decimal(0);
       for (const part of row.payments) {
-        const literal = part.method.trim().toUpperCase().replace(/\s+/g, ' ');
-        if (literal === 'CASH' || literal === 'SBC QRPH') continue;
-        const matched = config
-          .defaults()
-          .paymentMethods.filter(
+        const literal = part.method
+          .toUpperCase()
+          .replace(/\b(?:BNPL|SNPL)\b/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (literal === 'CASH' || literal === 'CASH PAYMENT' || literal === 'SBC QRPH') continue;
+        const matched = result.configuration.paymentMethods
+          .flatMap((method) => [
+            { name: method.cardName, method },
+            ...result.configuration.aliases
+              .filter((alias) => alias.cardName === method.cardName)
+              .map((alias) => ({ name: alias.alias, method })),
+          ])
+          .filter(
             (m) =>
-              literal === m.cardName.toUpperCase() ||
-              literal.startsWith(m.cardName.toUpperCase() + ' '),
+              literal === m.name.toUpperCase() || literal.startsWith(m.name.toUpperCase() + ' '),
           )
-          .sort((a, b) => b.cardName.length - a.cardName.length)[0];
-        if (!matched || /\b(BNPL|SNPL)\b/.test(literal)) {
+          .sort((a, b) => b.name.length - a.name.length)[0]?.method;
+        if (!matched || /\b(PROMO|PROMOTIONAL)\b/.test(literal)) {
           assert.ok(
             indices.every((i) => result.items[i].partialCalculation),
             'Unconfigured parts only occur in partial calculations',
@@ -224,19 +240,67 @@ async function main() {
   await book.xlsx.load(buffer as any);
   assert.deepEqual(
     book.worksheets.map((w) => w.name),
-    ['Item Bank Deductions', 'Bank & Branch Summary', 'Configuration Settings', 'Needs Review'],
+    ['Item Bank Deductions', BRANCH_DATE_SUMMARY_SHEET, 'Configuration Settings', 'Needs Review'],
   );
+  const summary = book.worksheets[1];
+  assert.equal(summary.columnCount, 6);
+  assert.equal(summary.getCell('A1').value, BRANCH_DATE_SUMMARY_TITLE);
+  assert.deepEqual(
+    (summary.getRow(2).values as string[]).slice(1),
+    BRANCH_DATE_SUMMARY_COLUMNS.map((c) => c.header),
+  );
+  const eligible = result.items.filter(
+    (i) =>
+      i.adjustment !== null &&
+      i.grossMargin !== null &&
+      !i.partialCalculation &&
+      i.salesDate &&
+      i.branch.trim(),
+  );
+  for (const key of ['sales', 'totalCost', 'adjustment', 'grossMargin'] as const) {
+    assert.equal(
+      sum(result.branchDateSummary.map((g) => g[key])),
+      sum(eligible.map((i) => (key === 'sales' ? i.lineTotal : i[key]!))),
+    );
+  }
+  for (const [index, group] of result.branchDateSummary.entries()) {
+    const items = eligible.filter(
+      (i) =>
+        i.salesDate === group.date &&
+        i.branch.replace(/\s+/g, ' ').trim().toUpperCase() === group.branch.toUpperCase(),
+    );
+    assert.equal(group.sales, sum(items.map((i) => i.lineTotal)));
+    assert.equal(group.totalCost, sum(items.map((i) => i.totalCost!)));
+    assert.equal(group.adjustment, sum(items.map((i) => i.adjustment!)));
+    assert.equal(group.grossMargin, sum(items.map((i) => i.grossMargin!)));
+    assert.deepEqual((summary.getRow(index + 3).values as unknown[]).slice(1), [
+      new Date(group.date + 'T00:00:00.000Z'),
+      group.branch,
+      Number(group.sales),
+      Number(group.totalCost),
+      Number(group.adjustment),
+      Number(group.grossMargin),
+    ]);
+  }
   const main = book.worksheets[0];
   assert.equal(main.columnCount, 17);
   assert.deepEqual(
     (main.getRow(1).values as string[]).slice(1),
     ITEM_COLUMNS.map((c) => c.header),
   );
-  assert.equal(main.rowCount, sales.length + 1);
-  for (const [index, item] of result.items.entries()) {
+  const exportedItems = result.items.filter(
+    (item) => item.cardName.trim() && !(Number(item.quantity) < 0),
+  );
+  assert.equal(main.rowCount, exportedItems.length + 1);
+  for (const [index, item] of exportedItems.entries()) {
     assert.equal(main.getCell(index + 2, 1).value, item.productId || '');
     assert.equal(main.getCell(index + 2, 1).type, ExcelJS.ValueType.String);
     assert.equal(main.getCell(index + 2, 5).value, item.product);
+    assert.equal(
+      main.getCell(index + 2, 8).value,
+      item.totalCost === null ? null : Number(item.totalCost),
+      'Sheet 1 displays the same line cost used by gross margin and Sheet 2',
+    );
     assert.equal(main.getCell(index + 2, 11).value, item.originalPaymentMethod);
     assert.equal(
       main.getCell(index + 2, 13).value,

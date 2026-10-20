@@ -3,7 +3,14 @@ import { CommonModule } from '@angular/common';
 import { FormControl, ReactiveFormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatTabsModule } from '@angular/material/tabs';
-import { Calculation, ITEM_COLUMNS } from '../../models';
+import {
+  Calculation,
+  ITEM_COLUMNS,
+  BRANCH_DATE_SUMMARY_COLUMNS,
+  BRANCH_DATE_SUMMARY_SHEET,
+  BRANCH_DATE_SUMMARY_TITLE,
+  showInItemBankDeductions,
+} from '../../models';
 type Column = { header: string; key: string; format: string };
 @Component({
   selector: 'app-calculation-results',
@@ -16,8 +23,8 @@ export class CalculationResultsComponent {
     this.result = value;
     this.page = 0;
     this.data = [
-      value.items.map((i) => ({ ...i })),
-      value.bankSummary.map((b) => ({ ...b })),
+      value.items.filter(showInItemBankDeductions).map((i) => ({ ...i })),
+      value.branchDateSummary.map((b) => ({ ...b })),
       value.reviews.map((r) => ({ ...r })),
     ];
   }
@@ -27,6 +34,8 @@ export class CalculationResultsComponent {
   view = 0;
   page = 0;
   readonly pageSize = 50;
+  readonly branchDateSummaryTitle = BRANCH_DATE_SUMMARY_TITLE;
+  readonly branchDateSummarySheet = BRANCH_DATE_SUMMARY_SHEET;
   sortKey = 'sourceRow';
   ascending = true;
   readonly search = new FormControl('', { nonNullable: true });
@@ -36,17 +45,7 @@ export class CalculationResultsComponent {
   }
   readonly columnSets: Column[][] = [
     ITEM_COLUMNS.map((c) => ({ ...c })),
-    [
-      { header: 'Bank', key: 'bank', format: 'text' },
-      { header: 'Configured Card Name', key: 'cardName', format: 'text' },
-      { header: 'Branch', key: 'branch', format: 'text' },
-      { header: 'Total Sales', key: 'sales', format: 'money' },
-      { header: 'Bank Charges', key: 'charges', format: 'money' },
-      { header: 'Subsidies', key: 'subsidies', format: 'money' },
-      { header: 'GrossMargin', key: 'grossMargin', format: 'money' },
-      { header: 'Processed Items', key: 'processedItems', format: 'number' },
-      { header: 'Needs Review', key: 'reviewCount', format: 'number' },
-    ],
+    BRANCH_DATE_SUMMARY_COLUMNS.map((c) => ({ ...c })),
     [
       { header: 'Product ID', key: 'productId', format: 'text' },
       { header: 'Sales Date', key: 'salesDate', format: 'date' },
@@ -60,6 +59,9 @@ export class CalculationResultsComponent {
   ];
   get columns() {
     return this.columnSets[this.view];
+  }
+  get matchedItemCount() {
+    return this.data[0]?.length ?? 0;
   }
   get filtered() {
     const query = this.search.value.toLowerCase();
@@ -87,6 +89,7 @@ export class CalculationResultsComponent {
       else order = String(av ?? '').localeCompare(String(bv ?? ''));
       return (
         (this.ascending ? order : -order) ||
+        (this.view === 1 ? String(a['branch']).localeCompare(String(b['branch'])) : 0) ||
         Number(a['sourceRow'] || 0) - Number(b['sourceRow'] || 0)
       );
     });
@@ -100,7 +103,7 @@ export class CalculationResultsComponent {
   changeView(index: number) {
     this.view = index;
     this.page = 0;
-    this.sortKey = index === 1 ? 'bank' : 'sourceRow';
+    this.sortKey = index === 1 ? 'date' : 'sourceRow';
     this.ascending = true;
     this.search.setValue('');
   }

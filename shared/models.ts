@@ -100,6 +100,31 @@ export interface ItemResult {
   totalCost: string | null;
   source: Source;
 }
+// Tender is populated by the existing configuration matcher, including aliases and BNPL/SNPL.
+export const hasConfiguredBankPayment = (item: Pick<ItemResult, 'cardName'>): boolean =>
+  item.cardName.trim().length > 0;
+export const hasNegativeQuantity = (item: Pick<ItemResult, 'quantity'>): boolean =>
+  Number(item.quantity) < 0;
+// Negative quantities belong in Needs Review, while other matched items remain visible.
+export const showInItemBankDeductions = (
+  item: Pick<ItemResult, 'cardName' | 'quantity'>,
+): boolean => hasConfiguredBankPayment(item) && !hasNegativeQuantity(item);
+export const isBranchDateSummaryEligible = (
+  item: ItemResult,
+): item is ItemResult & {
+  appliedRate: string;
+  adjustment: string;
+  totalCost: string;
+  grossMargin: string;
+} =>
+  showInItemBankDeductions(item) &&
+  item.appliedRate !== null &&
+  item.adjustment !== null &&
+  item.totalCost !== null &&
+  item.grossMargin !== null &&
+  !item.partialCalculation &&
+  !!item.salesDate &&
+  !!item.branch.trim();
 export interface BankSummary {
   bank: string;
   cardName: string;
@@ -110,6 +135,14 @@ export interface BankSummary {
   grossMargin: string;
   processedItems: number;
   reviewCount: number;
+}
+export interface BranchDateSummary {
+  date: string;
+  branch: string;
+  sales: string;
+  totalCost: string;
+  adjustment: string;
+  grossMargin: string;
 }
 export interface Review {
   productId: string;
@@ -126,6 +159,7 @@ export interface Review {
 export interface Calculation {
   items: ItemResult[];
   bankSummary: BankSummary[];
+  branchDateSummary: BranchDateSummary[];
   reviews: Review[];
   configuration: Configuration;
   calculatedAt: string;
@@ -148,6 +182,16 @@ export interface CalculationResponse {
   result: Calculation;
   exportToken: string;
 }
+export const BRANCH_DATE_SUMMARY_TITLE = 'Expected Gross Margin Per Branch by Date';
+export const BRANCH_DATE_SUMMARY_SHEET = 'Gross Margin by Branch & Date';
+export const BRANCH_DATE_SUMMARY_COLUMNS = [
+  { header: 'Date', key: 'date', format: 'date' },
+  { header: 'Branch', key: 'branch', format: 'text' },
+  { header: 'Total Credit Card Payments', key: 'sales', format: 'money' },
+  { header: 'Total Cost / COGS', key: 'totalCost', format: 'money' },
+  { header: 'Total Bank Charges / Subsidy', key: 'adjustment', format: 'money' },
+  { header: 'Gross Margin', key: 'grossMargin', format: 'money' },
+] as const;
 export const ITEM_COLUMNS = [
   { header: 'Product ID', key: 'productId', format: 'text' },
   { header: 'Sales Date', key: 'salesDate', format: 'date' },
@@ -156,7 +200,7 @@ export const ITEM_COLUMNS = [
   { header: 'Product Name', key: 'product', format: 'text' },
   { header: 'Quantity', key: 'quantity', format: 'number' },
   { header: 'Price', key: 'price', format: 'money' },
-  { header: 'Cost', key: 'cost', format: 'money' },
+  { header: 'Cost', key: 'totalCost', format: 'money' },
   { header: 'Discount', key: 'discount', format: 'money' },
   { header: 'Line Total', key: 'lineTotal', format: 'money' },
   { header: 'Payment', key: 'originalPaymentMethod', format: 'text' },

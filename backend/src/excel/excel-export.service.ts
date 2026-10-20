@@ -2,7 +2,15 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import ExcelJS from 'exceljs';
 import Decimal from 'decimal.js';
 import * as XLSX from 'xlsx';
-import { Calculation, Configuration, ITEM_COLUMNS } from '../../../shared/models';
+import {
+  Calculation,
+  Configuration,
+  ITEM_COLUMNS,
+  BRANCH_DATE_SUMMARY_COLUMNS,
+  BRANCH_DATE_SUMMARY_SHEET,
+  BRANCH_DATE_SUMMARY_TITLE,
+  showInItemBankDeductions,
+} from '../../../shared/models';
 import { ConfigService } from '../config/config.service';
 import { ExcelService } from './excel.service';
 import { money } from '../calculation/money';
@@ -29,31 +37,40 @@ export class ExcelExportService {
     columns: Column[],
     rows: Record<string, unknown>[],
     totals: string[] = [],
+    heading?: string,
   ) {
-    const ws = book.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1 }] });
+    const headerRow = heading ? 2 : 1;
+    const ws = book.addWorksheet(name, { views: [{ state: 'frozen', ySplit: headerRow }] });
     ws.columns = columns.map((c) => ({
       header: c.header,
       key: c.key,
       width: c.width || 24,
       style: c.format ? { numFmt: c.format } : {},
     }));
+    if (heading) {
+      ws.insertRow(1, [heading]);
+      ws.mergeCells(1, 1, 1, columns.length);
+      ws.getRow(1).height = 32;
+      ws.getCell('A1').font = { name: 'Aptos', size: 16, bold: true };
+      ws.getCell('A1').alignment = { vertical: 'middle' };
+    }
     rows.forEach((row) =>
       ws.addRow(Object.fromEntries(Object.entries(row).map(([k, v]) => [k, safe(v)]))),
     );
     ws.autoFilter = {
-      from: { row: 1, column: 1 },
-      to: { row: Math.max(1, ws.rowCount), column: columns.length },
+      from: { row: headerRow, column: 1 },
+      to: { row: Math.max(headerRow, ws.rowCount), column: columns.length },
     };
-    ws.getRow(1).height = 32;
-    ws.getRow(1).eachCell((cell) => {
+    ws.getRow(headerRow).height = 32;
+    ws.getRow(headerRow).eachCell((cell) => {
       cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF142B49' } };
       cell.alignment = { vertical: 'middle', wrapText: true };
     });
-    for (let r = 2; r <= ws.rowCount; r++) {
+    for (let r = headerRow + 1; r <= ws.rowCount; r++) {
       const review =
-        Boolean(rows[r - 2]?.['needsReview']) ||
-        String(rows[r - 2]?.['status'] || '').includes('Review') ||
+        Boolean(rows[r - headerRow - 1]?.['needsReview']) ||
+        String(rows[r - headerRow - 1]?.['status'] || '').includes('Review') ||
         name === 'Needs Review';
       ws.getRow(r).eachCell((cell) => {
         cell.font = { name: 'Aptos', size: 10 };
@@ -337,11 +354,12 @@ export class ExcelExportService {
                 ? '@'
                 : undefined,
     }));
+    const reportItems = result.items.filter(showInItemBankDeductions);
     const ws = this.table(
       book,
       'Item Bank Deductions',
       columns,
-      result.items.map((i) => ({
+      reportItems.map((i) => ({
         ...i,
         needsReview: !!(i.issues.length || i.warnings.length),
         salesDate: date(i.salesDate),
@@ -350,7 +368,7 @@ export class ExcelExportService {
             ? Number(i.quantity)
             : i.quantity,
         price: numeric(i.price),
-        cost: numeric(i.cost),
+        totalCost: numeric(i.totalCost),
         discount: numeric(i.discount),
         lineTotal: numeric(i.lineTotal),
         appliedRate:
@@ -363,51 +381,56 @@ export class ExcelExportService {
     );
     // An explicit Excel string cell is inert even when an identifier starts with '='.
     // Preserve the actual identifier rather than adding a visible apostrophe to it.
-    result.items.forEach((i, n) => {
+    reportItems.forEach((i, n) => {
       ws.getCell(n + 2, 1).value = i.productId;
       ws.getCell(n + 2, 1).numFmt = '@';
       // Copy source Payment verbatim into a literal string cell, including line breaks.
       ws.getCell(n + 2, ws.getColumn('originalPaymentMethod').number).value =
         i.originalPaymentMethod;
+      ws.getCell(n + 2, ws.getColumn('totalCost').number).note =
+        'Original source Cost: ' +
+        JSON.stringify(i.cost) +
+        '. Quantity: ' +
+        JSON.stringify(i.quantity) +
+        '. This cell shows the calculated total product cost used for gross margin. See Calculation Explanation for the cost basis and Sheet 2 inclusion.';
     });
     ws.getCell('H1').note =
-      'Original Cost value. Unit/line interpretation and normalized total product cost are documented in Calculation Explanation.';
+      'Total product cost used for gross margin and Sheet 2: unit cost × quantity, or the source total line cost without multiplying again. Original source cost is preserved in each cell note and Calculation Explanation. Sum only rows marked Included in Sheet 2 to reconcile with that summary; unresolved costs stay blank.';
     ws.getCell('J1').note = 'Final net line sales amount. Discount is not deducted a second time.';
     ws.getCell(1, ws.getColumn('cardName').number).note =
-      'Recognized configured card names from Sales Report payment details. A name remains visible when another payment or source value needs review; it does not mean the bank charge has been calculated. See Calculation Explanation.';
+      'Recognized configured card names from Sales Report payment details. BNPL/SNPL labels are ignored unless explicitly configured; original Payment text is preserved. A name remains visible when another payment or source value needs review; it does not mean the bank charge has been calculated. See Calculation Explanation.';
     ws.getCell(1, ws.getColumn('adjustment').number).note =
-      'Positive = bank charge; negative = subsidy. Blank = no configured card match or unresolved calculation. Cash-only and SBC QRPH-only rows are not calculated. In a split, only the matched card portion receives a bank charge. When another payment method is unconfigured, only matched-method charges are shown; see Calculation Explanation. Partial rows are excluded from confirmed totals.';
+      'Positive = bank charge; negative = subsidy. Only items with a configured bank payment match appear on this sheet. Negative-quantity items are moved to Needs Review and excluded from summary totals. Cash-only, other no-charge-only and unmatched rows are omitted. Unresolved calculations remain blank. In a split, only the matched card portion receives a bank charge. When another payment method is unconfigured, only matched-method charges are shown; see Calculation Explanation. Partial rows are excluded from confirmed totals.';
     ws.getCell(1, ws.getColumn('grossMargin').number).note =
       'Line Total minus total product cost and calculated bank charges/subsidies. Blank when no configured card matches, or cost/charges are unresolved. Provisional when another payment method remains unconfigured; see Calculation Explanation. Partial rows are excluded from confirmed totals.';
     const summary = this.table(
       book,
-      'Bank & Branch Summary',
-      [
-        { header: 'Bank', key: 'bank' },
-        { header: 'Configured Payment Method', key: 'cardName', width: 30 },
-        { header: 'Branch', key: 'branch' },
-        { header: 'Total Sales', key: 'sales', format: currency },
-        { header: 'Total Bank Charges', key: 'charges', format: currency },
-        { header: 'Total Subsidies', key: 'subsidies', format: currency },
-        { header: 'Total Gross Margin', key: 'grossMargin', format: currency },
-        { header: 'Total Processed Items', key: 'processedItems' },
-        { header: 'Transactions Requiring Review', key: 'reviewCount' },
-      ],
-      result.bankSummary.map((b) => ({
+      BRANCH_DATE_SUMMARY_SHEET,
+      BRANCH_DATE_SUMMARY_COLUMNS.map((c) => ({
+        header: c.header,
+        key: c.key,
+        width: c.key === 'date' ? 18 : c.key === 'branch' ? 36 : 32,
+        format: c.format === 'money' ? currency : c.format === 'date' ? 'dd mmm yyyy' : '@',
+      })),
+      result.branchDateSummary.map((b) => ({
         ...b,
+        date: date(b.date),
         sales: numeric(b.sales),
-        charges: numeric(b.charges),
-        subsidies: numeric(b.subsidies),
+        totalCost: numeric(b.totalCost),
+        adjustment: numeric(b.adjustment),
         grossMargin: numeric(b.grossMargin),
       })),
-      ['sales', 'charges', 'subsidies', 'grossMargin'],
+      ['sales', 'totalCost', 'adjustment', 'grossMargin'],
+      BRANCH_DATE_SUMMARY_TITLE,
     );
-    summary.lastRow!.getCell(8).value = result.summary.processedItems;
-    summary.lastRow!.getCell(9).value = result.summary.reviewCount;
-    summary.getCell('H1').note =
-      'Unique items per bank/method. Split-payment items can occur in more than one group; the grand total is the original source item count.';
-    summary.getCell('D1').note =
-      'Only validated payment allocations on rows with matched configured cards contribute sales/charges/subsidies. Cash-only and other rows without a configured card contribute counts only. Partial calculations with unconfigured payment methods are excluded from all confirmed financial totals. Gross margin includes only rows with known product cost. Missing identifiers do not discard valid monetary calculations.';
+    summary.getCell('C2').note =
+      'Sum of net Line Total for fully calculated items with a configured bank payment, known total cost, date and branch. Negative-quantity items contribute no sales, cost, bank charges or gross margin and are shown in Needs Review. Cash-only, unmatched, partial and incomplete rows are excluded; see the original Sales Report and Needs Review. Reconciled splits retain the full product sales and cost, matching the existing individual gross margin. Missing Product ID warnings do not exclude valid calculations.';
+    summary.getCell('D2').note =
+      'Sum of Sheet 1 Cost (column H) for rows marked Included in Sheet 2. Both sheets use the same total product cost: unit cost × quantity, or an already extended line cost. Unknown costs are never treated as zero.';
+    summary.getCell('E2').note =
+      'Sum of existing signed Bank Charges / Subsidy: positive charges minus negative-rate subsidies. No rates are recalculated.';
+    summary.getCell('F2').note =
+      'Sum of eligible individual GrossMargin values from Sheet 1. Bank charges and subsidies are already included and are not deducted again.';
     this.settings(book, result.configuration);
     this.table(
       book,
