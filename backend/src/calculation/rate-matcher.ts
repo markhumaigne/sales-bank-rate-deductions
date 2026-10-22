@@ -1,6 +1,7 @@
 import { Configuration, PaymentMethod } from '../../../shared/models';
 import { normalize } from '../config/config.service';
 import defaults from '../config/bank-rates.json';
+import { paymentDescription } from './payment-parser';
 type RateMatch = {
   method?: PaymentMethod;
   nonCard?: boolean;
@@ -8,10 +9,30 @@ type RateMatch = {
   reason?: string;
   note?: string;
 };
-const recognized = (value: string) => normalize(value).replace(/(\d)\s*(MOS|MONTHS?)\b/g, '$1 MOS');
+const recognized = (value: string) =>
+  normalize(value)
+    .replace(/\s*-\s*/g, ' ')
+    .replace(/(\d)\s*(MOS?|MONTHS?|M)\b/g, '$1 MOS');
 const withoutClassifications = (value: string) =>
   normalize(value.replace(/\b(?:BNPL|SNPL)\b/g, ' '));
 const isCash = (value: string) => /^(?:CASH|CASH PAYMENT)$/.test(value);
+// An integer can end an inline payment only when the following description
+// starts another complete known method. This detects boundaries, never rates.
+export function startsPaymentMethod(raw: string, c: Configuration): boolean {
+  const value = recognized(paymentDescription(raw).method);
+  const underlying = withoutClassifications(value);
+  return [
+    ...c.paymentMethods.map((method) => method.cardName),
+    ...c.aliases.map((alias) => alias.alias),
+    ...c.nonCardMethods,
+    'CASH',
+    'CASH PAYMENT',
+    'CHARGE',
+  ].some((method) => {
+    const name = recognized(method);
+    return [value, underlying].some((text) => text === name || text.startsWith(name + ' '));
+  });
+}
 function glob(value: string, pattern: string): boolean {
   // Linear wildcard matching; user patterns are never executed as regular expressions.
   const p = normalize(pattern);
@@ -52,8 +73,15 @@ export function withDefaultAliases(c: Configuration): Configuration {
   return aliases.length ? { ...c, aliases: [...c.aliases, ...aliases] } : c;
 }
 
-export function matchRate(raw: string, c: Configuration, description = false): RateMatch {
-  const value = normalize(raw);
+export function matchRate(
+  raw: string,
+  c: Configuration,
+  description = false,
+  branch = '',
+): RateMatch {
+  if (/[\r\n+;|]|\s[/&]\s|\bSPLIT\b/i.test(raw))
+    return { reason: 'Ambiguous combined payment methods; separate actual amounts are required.' };
+  const value = normalize(description ? paymentDescription(raw).method : raw);
   const underlying = withoutClassifications(value);
   // Cash cannot acquire a bank rate through an exact name, alias or broad wildcard.
   if (isCash(underlying)) return { nonCard: true, cash: true };
@@ -79,6 +107,18 @@ export function matchRate(raw: string, c: Configuration, description = false): R
   }
   if (match.method && isCash(withoutClassifications(normalize(match.method.cardName))))
     return { nonCard: true, cash: true };
+  if (match.method?.branchRates) {
+    const rates = Object.entries(match.method.branchRates).filter(
+      ([b]) => normalize(b) === normalize(branch),
+    );
+    if (rates.length > 1) return { reason: 'Ambiguous configured branch rates.' };
+    if (rates.length)
+      match = {
+        ...match,
+        method: { ...match.method, rate: rates[0][1] },
+        note: (match.note ?? '') + ` Branch-specific rate for ${branch}: ${rates[0][1]}%.`,
+      };
+  }
   return match;
 }
 
@@ -103,8 +143,26 @@ function matchConfiguredRate(value: string, c: Configuration, description: boole
       glob(value, p.pattern),
   );
   const targets = [...new Set(patterns.map((p) => normalize(p.cardName)))];
-  if (targets.length === 1)
-    return { method: c.paymentMethods.find((m) => normalize(m.cardName) === targets[0]) };
+  if (targets.length === 1) {
+    const method = c.paymentMethods.find((m) => normalize(m.cardName) === targets[0]);
+    const type = (name: string) =>
+      recognized(name)
+        .replace(/\b(?:CREDIT|DEBIT) SALES\b/g, '')
+        .match(/\b(?:\d+ MOS|DEBIT|CREDIT|STRAIGHT)\b/g)
+        ?.join(' / ');
+    const bank = c.banks
+      .filter((b) => name === recognized(b) || name.startsWith(recognized(b) + ' '))
+      .sort((a, b) => b.length - a.length)[0];
+    if (
+      method &&
+      ((type(value) && type(value) !== type(method.cardName)) ||
+        (bank && normalize(bank) !== normalize(method.bank)))
+    )
+      return {
+        reason: 'Ambiguous configured pattern would substitute a different bank or payment type.',
+      };
+    return { method };
+  }
   if (targets.length > 1) return { reason: 'Ambiguous configured payment patterns.' };
   // The actual Sales Report describes each method followed by its cardholder/reference.
   // Prefix recognition is allowed only for these explicit description fields.
@@ -120,9 +178,13 @@ function matchConfiguredRate(value: string, c: Configuration, description: boole
       .filter((x) => {
         const prefix = recognized(x.name);
         if (clean !== prefix && !clean.startsWith(prefix + ' ')) return false;
-        const suffix = clean.slice(prefix.length).trim();
+        let suffix = clean.slice(prefix.length).trim();
+        // These literal report classifications are metadata after a complete method.
+        suffix = suffix.replace(/^(?:CREDIT|DEBIT) SALES\b/, '').trim();
         if (
-          /\b(BNPL|SNPL|PROMO|PROMOTIONAL|SPLIT)\b/.test(suffix) ||
+          /\b(BNPL|SNPL|PROMO|PROMOTIONAL|SPLIT|DEBIT|CREDIT|STRAIGHT|INSTALLMENTS?|QRPH|QR|CASH|CASA|TRANSFER)\b/.test(
+            suffix,
+          ) ||
           /\b\d+\s*MOS\b/.test(suffix) ||
           /[+;|/&]/.test(suffix)
         )

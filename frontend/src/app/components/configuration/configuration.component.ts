@@ -65,10 +65,11 @@ export class ConfigurationComponent {
         `${group.value.cardName} ${group.value.bank}`.toLowerCase().includes(this.query()),
       );
   }
-  private method(cardName = '', bank = '', rate = '0.00') {
+  private method(cardName = '', bank = '', rate = '0.00', branchRates?: Record<string, string>) {
     return new FormGroup({
       cardName: text(cardName),
       bank: text(bank),
+      branchRates: new FormControl(branchRates, { nonNullable: true }),
       rate: new FormControl(rate, {
         nonNullable: true,
         validators: [
@@ -85,7 +86,9 @@ export class ConfigurationComponent {
     this.aliases.clear({ emitEvent: false });
     this.patterns.clear({ emitEvent: false });
     c.paymentMethods.forEach((m) =>
-      this.methods.push(this.method(m.cardName, m.bank, m.rate), { emitEvent: false }),
+      this.methods.push(this.method(m.cardName, m.bank, m.rate, m.branchRates), {
+        emitEvent: false,
+      }),
     );
     c.aliases.forEach((a) =>
       this.aliases.push(new FormGroup({ alias: text(a.alias), cardName: text(a.cardName) }), {
@@ -125,6 +128,7 @@ export class ConfigurationComponent {
           cardName: String(m['cardName'] ?? ''),
           bank: String(m['bank'] ?? ''),
           rate: String(m['rate'] ?? ''),
+          ...(m['branchRates'] ? { branchRates: m['branchRates'] as Record<string, string> } : {}),
         })),
         aliases: v.aliases as Configuration['aliases'],
         patterns: v.patterns as Configuration['patterns'],

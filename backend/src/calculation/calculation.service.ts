@@ -11,8 +11,9 @@ import {
 } from '../../../shared/models';
 import { normalize } from '../config/config.service';
 import { allocate, fixed, money, sum } from './money';
-import { matchRate, withDefaultAliases } from './rate-matcher';
+import { matchRate, startsPaymentMethod, withDefaultAliases } from './rate-matcher';
 import { summarizeByBranchAndDate } from './branch-date-summary';
+import { parsePayments, paymentDescription } from './payment-parser';
 
 type Prepared = { parts: PaymentPart[]; scope: 'invoice' | 'line'; error?: string };
 type Allocation = {
@@ -23,54 +24,29 @@ type Allocation = {
   fee: Decimal;
   rate: string | null;
 };
-function paymentData(s: Sale, c: Configuration): Prepared {
-  if (s.payments.length)
+function paymentData(s: Sale, configuration: Configuration): Prepared {
+  const parsed = parsePayments(s.payment, (description) =>
+    startsPaymentMethod(description, configuration),
+  );
+  // Payment is authoritative when it supplies amounts. Existing explicit amount
+  // columns inside the Sales Report remain usable for method-only Payment cells.
+  if (s.payments.length && !parsed.parts.some((p) => p.amount) && !/[₱,.]|\bPHP\b/i.test(s.payment))
     return {
       parts: s.payments,
       scope: s.paymentScope,
       error: s.paymentIssues.join(' ') || undefined,
     };
-  const raw = s.payment;
-  if (!raw.trim()) return { parts: [], scope: 'line', error: 'Missing Payment Method.' };
-  // Read explicit amounts before matching the whole cell: a configured wildcard must
-  // not turn a card/cash split into one bank payment for the full product price.
-  const lines = raw
-    .split(/\r?\n/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-  const parts: PaymentPart[] = [];
-  for (const line of lines) {
-    const match = /^(.*?)\s+((?:PHP\s*|₱\s*)?-?\d[\d,]*\.\d{2}|\(\d[\d,]*\.\d{2}\))$/i.exec(line);
-    if (!match) {
-      parts.length = 0;
-      break;
-    }
-    parts.push({ method: match[1], amount: match[2], reference: '', description: true });
-  }
-  if (parts.length) return { parts, scope: s.paymentScope };
-  if (/\bSPLIT\b|[+\n;|]/i.test(raw) || /\bCASH\s*[/&]/i.test(raw))
-    return {
-      parts: [],
-      scope: 'line',
-      error:
-        'Split payment has no reliable per-method amounts. Map payment amounts or correct the Sales Report.',
-    };
-  const direct = matchRate(raw, c);
-  if (direct.method || direct.nonCard)
-    return {
-      parts: [{ method: raw, amount: s.lineTotal, reference: '', description: false }],
-      scope: 'line',
-    };
   return {
-    parts: [{ method: raw, amount: s.lineTotal, reference: '', description: true }],
-    scope: 'line',
+    parts: parsed.parts,
+    scope: s.paymentScope,
+    error: [...parsed.issues, ...s.paymentIssues].join(' ') || undefined,
   };
 }
 // Recognizing a payment name does not require a valid amount or a completed allocation.
 // Keep this separate from financial validation so one unresolved method cannot hide another.
 function identifiedMethods(s: Sale, prepared: Prepared, c: Configuration) {
   const matches = prepared.parts.flatMap((p) => {
-    const method = matchRate(p.method, c, p.description).method;
+    const method = matchRate(p.method, c, p.description, s.branch).method;
     return method ? [method] : [];
   });
   const raw = s.original.payment ?? s.payment;
@@ -93,20 +69,17 @@ function sourceValue(s: Sale, key: 'lineTotal' | 'quantity', label: string): str
   const location = s.cells[key] ? 'cell ' + s.cells[key] : 'source row ' + s.source.row;
   return label + ' at ' + location + ' is ' + (value.trim() ? JSON.stringify(value) : 'blank');
 }
-function reportIssue(issue: string): string {
-  // Hide only the requested report messages. Original issues still control review
-  // status and financial eligibility; suppressing text must never resolve a payment.
-  if (issue.startsWith('Invoice payment discrepancy:')) return '';
-  return issue
-    .replace(/"\s*Charge\s*": Unknown payment method or missing configured bank rate\.\s*/gi, '')
-    .trim();
-}
 @Injectable()
 export class CalculationService {
   calculate(sales: Sale[], configuration: Configuration): Calculation {
     configuration = withDefaultAliases(configuration);
     const allocations = new Map<number, Allocation[]>();
-    const prepared = sales.map((s) => paymentData(s, configuration));
+    const prepared = sales.map((sale) => paymentData(sale, configuration));
+    // Only the beginning of Payment controls this routing rule. A later cash
+    // entry or a word inside a cardholder name must not hide a configured bank.
+    const reviewPayment = sales.map((s) =>
+      /^\s*(CASH|CHARGE)\b/i.exec(s.original.payment ?? s.payment)?.[1].toUpperCase(),
+    );
     const recognized = sales.map((s, index) =>
       identifiedMethods(s, prepared[index], configuration),
     );
@@ -190,6 +163,9 @@ export class CalculationService {
         bank: [...new Set(recognized[index].map((m) => m.bank))].join(' / '),
         originalPaymentMethod: s.original.payment ?? s.payment,
         appliedRate: null,
+        appliedRate1: null,
+        appliedRate2: null,
+        appliedRate3: null,
         adjustment: null,
         grossMargin: null,
         partialCalculation: false,
@@ -209,6 +185,8 @@ export class CalculationService {
         normalize(s.invoice),
         normalize(s.branch),
         s.date,
+        s.source.file,
+        s.source.sheet,
         s.invoice.trim() ? '' : i,
       ]);
       const g = groups.get(key) || [];
@@ -220,7 +198,26 @@ export class CalculationService {
         items[i].issues.push(reason);
         if (items[i].status !== 'Invalid Sales Amount') items[i].status = status;
       });
-    const process = (indices: number[], parts: PaymentPart[]) => {
+    const routePaymentToReview = (indices: number[], triggers: number[]) => {
+      indices.forEach((i) => (items[i].reviewOnly = true));
+      fail(
+        indices,
+        'Payment starts with ' +
+          triggers
+            .map((i) => `${reviewPayment[i]} at Sales Source Row ${sales[i].source.row}`)
+            .join('; ') +
+          '. Moved to Needs Review under the Cash/Charge-first payment rule. ' +
+          (indices.length > 1
+            ? 'All products sharing this invoice payment are held together to prevent partial or duplicate deductions. '
+            : '') +
+          'Bank charges and gross margin are pending review and excluded from Sheet 1 and Sheet 2. ' +
+          triggers
+            .map((i) => prepared[i].error ?? '')
+            .filter(Boolean)
+            .join(' '),
+      );
+    };
+    const process = (indices: number[], parts: PaymentPart[], allowCashChange = true) => {
       const badRows = indices.filter(
         (i) =>
           !sourceValues[i].net ||
@@ -228,7 +225,9 @@ export class CalculationService {
           !sourceValues[i].quantity ||
           sourceValues[i].quantity!.lte(0) ||
           sales[i].issues.length ||
-          !sales[i].invoice.trim(),
+          !sales[i].invoice.trim() ||
+          !sales[i].branch.trim() ||
+          !sales[i].date,
       );
       if (badRows.length) {
         // Individual rows already describe their own source problems. Explain the
@@ -258,7 +257,9 @@ export class CalculationService {
         );
         return;
       }
-      const matches = parts.map((p) => matchRate(p.method, configuration, p.description));
+      const matches = parts.map((p) =>
+        matchRate(p.method, configuration, p.description, sales[indices[0]].branch),
+      );
       const net = sum(weights),
         paid = sum(amounts as Decimal[]);
       // Cash tender can include change. Keep every configured bank amount intact
@@ -267,6 +268,7 @@ export class CalculationService {
       let cashChangeExplanation = '';
       if (
         paid.gt(net) &&
+        allowCashChange &&
         matches.some((m) => !!m.method) &&
         matches.every((m) => m.method || m.nonCard)
       ) {
@@ -288,7 +290,7 @@ export class CalculationService {
             '. Configured bank payment amounts are unchanged; cash receives no bank charge.';
         }
       }
-      if (!net.eq(sum(amounts as Decimal[]))) {
+      if (!net.eq(sum(amounts as Decimal[])) && matches.some((m) => !!m.method)) {
         fail(
           indices,
           'Invoice payment discrepancy: explicit payments ' +
@@ -301,53 +303,51 @@ export class CalculationService {
         );
         return;
       }
-      if (cashChangeExplanation)
-        indices.forEach((i) => (items[i].explanation = cashChangeExplanation));
-      const unresolved = matches
-        .map((m, p) => (!m.method && !m.nonCard ? p : -1))
-        .filter((p) => p >= 0);
-      if (unresolved.length) {
-        const missing = unresolved.some((p) => !parts[p].method.trim());
-        const hasMatchedCard = matches.some((m) => !!m.method);
-        fail(
-          indices,
-          unresolved
-            .map(
-              (p) =>
-                '"' + parts[p].method + '": ' + (matches[p].reason || 'Missing payment method.'),
-            )
-            .join(' '),
-          hasMatchedCard
-            ? 'Needs Review'
-            : missing
-              ? 'Missing Payment Method'
-              : 'Missing Bank Rate',
-        );
-        if (!hasMatchedCard) return;
-        indices.forEach((i) => {
-          items[i].partialCalculation = true;
-          items[i].issues.push(
-            'Partial calculation: the applied rate and bank charge cover matched configured card payments only. ' +
-              'Charges for unconfigured payment portions are excluded, not assumed to be zero. ' +
-              'GrossMargin is provisional after the calculated charges. This row is excluded from confirmed financial totals.',
-          );
+      const paymentFees = parts.map((_, p) =>
+        matches[p].method
+          ? amounts[p]!.times(matches[p].method!.rate)
+              .div(100)
+              .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+          : new Decimal(0),
+      );
+      const details = parts
+        .map(
+          (part, p) =>
+            `${p + 1}. ${matches[p].method?.cardName ?? part.method}: actual payment ₱${fixed(money(part.amount)!)}; ` +
+            (matches[p].method
+              ? `Configured Rate: ${matches[p].method!.rate}%; Bank Charge / Subsidy: ₱${fixed(paymentFees[p])}.`
+              : `No matching configured rate${matches[p].nonCard ? ' (method with no bank charge)' : ''}; Bank Charge: ₱0.00. ${matches[p].reason ?? ''}`),
+        )
+        .join('\n');
+      indices.forEach((i, rowIndex) => {
+        items[i].explanation =
+          `Invoice: ${sales[i].invoice}\nCustomer Payment:\n${details}\nTotal Customer Payment: ₱${fixed(paid)}\nTotal Bank Charges / Subsidy: ₱${fixed(sum(paymentFees))}\nCalculation Basis: Actual customer payment amounts, not Line Total. ` +
+          cashChangeExplanation;
+        if (indices.length > 1)
+          items[i].explanation +=
+            ` Invoice payment evidence deduplicated across ${indices.length} product rows. Payments and rounded charges allocated proportionally by positive Line Total (row ₱${fixed(weights[rowIndex])} / invoice ₱${fixed(net)}); zero-Line-Total rows receive no payment or charge. Largest remainder centavo reconciliation; ties follow source row order. `;
+        matches.forEach((m) => {
+          if (m.reason?.startsWith('Ambiguous')) items[i].issues.push(m.reason);
         });
-      }
+      });
       // No-charge methods support split allocations but do not make a row eligible
       // for bank calculations on their own. A configured card must be present.
       if (!matches.some((m) => !!m.method)) {
         indices.forEach((i) => {
           const item = items[i];
-          const hasCash = matches.some((m) => m.cash);
-          if (hasCash) item.adjustment = '0.00';
+          item.cardName = '';
+          item.bank = '';
+          item.adjustment = '0.00';
           item.status = item.issues.length ? 'Needs Review' : 'Not Calculated';
-          item.explanation =
+          item.explanation +=
             'No configured card matches the payment allocation. Payment method(s) excluded from bank calculations: ' +
             parts.map((p) => p.method).join('; ') +
-            (hasCash
-              ? '. Cash has no bank charge: Bank Charges / Subsidy is ₱0.00. Applied Bank Rate and GrossMargin are left blank. '
-              : '. Applied Bank Rate, Bank Charges / Subsidy and GrossMargin are left blank. ') +
+            '. Bank Charges / Subsidy is ₱0.00. Applied Bank Rate columns and GrossMargin are left blank under the existing no-card margin rule. ' +
             'The original Payment text is retained for reference.';
+          if (!net.eq(paid))
+            item.warnings.push(
+              `Invoice payment discrepancy: actual payments ₱${fixed(paid)} versus net product sales ₱${fixed(net)}. No bank charges apply; verify the payment evidence.`,
+            );
         });
         return;
       }
@@ -358,12 +358,10 @@ export class CalculationService {
         const amountsPerItem = net.isZero()
           ? weights.map(() => new Decimal(0))
           : allocate(amount, weights);
-        const fee = match.method
-          ? amount.times(match.method.rate).div(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
-          : new Decimal(0);
-        const fees = amount.isZero()
+        const fee = paymentFees[p];
+        const fees = net.isZero()
           ? weights.map(() => new Decimal(0))
-          : signedAllocation(fee, amountsPerItem);
+          : signedAllocation(fee, weights);
         if (!sum(amountsPerItem).eq(amount) || !sum(fees).eq(fee))
           throw new Error('Payment allocation failed reconciliation.');
         indices.forEach((index, j) => {
@@ -382,7 +380,9 @@ export class CalculationService {
               ? match.method.cardName +
                 ' matched to configured rate ' +
                 match.method.rate +
-                '%. Eligible payment ₱' +
+                '%. Actual customer payment ₱' +
+                fixed(amount) +
+                "; this product's allocated payment share ₱" +
                 fixed(amountsPerItem[j]) +
                 '; allocated ' +
                 (fee.isNegative() ? 'subsidy' : 'charge') +
@@ -394,37 +394,64 @@ export class CalculationService {
                     ? 'Cash payment with no bank charge '
                     : 'Configured method with no bank charge ') +
                   part.method +
-                  ': ₱' +
+                  ": this product's allocated payment share ₱" +
                   fixed(amountsPerItem[j]) +
                   ' retained in payment allocation and excluded from bank charges.'
                 : 'Unconfigured payment ' +
                   part.method +
-                  ': ₱' +
+                  ": this product's allocated payment share ₱" +
                   fixed(amountsPerItem[j]) +
-                  ' retained in payment allocation; its unknown charge is excluded from the displayed calculation.');
+                  ' retained in payment allocation; no matching configured rate, so its bank charge is ₱0.00.');
           if (match.note) item.explanation += ' ' + match.note;
           if (match.method && /\b(?:BNPL|SNPL)\b/i.test(part.method))
             item.explanation += ' Original payment/tender: ' + JSON.stringify(part.method) + '.';
         });
       });
+      const rowCharges = new Map(
+        indices.map((index) => [index, sum(allocations.get(index)!.map((p) => p.fee))]),
+      );
+      const allocationTrace = indices
+        .filter((index) => !rowCharges.get(index)!.isZero())
+        .map(
+          (index) =>
+            `Sales Source Row ${sales[index].source.row} (${sales[index].product}): ₱${fixed(rowCharges.get(index)!)}`,
+        )
+        .join('; ');
       indices.forEach((index) => {
         const item = items[index],
           a = allocations.get(index)!;
-        const adjustment = sum(a.map((p) => p.fee)),
+        const adjustment = rowCharges.get(index)!,
           line = money(sales[index].lineTotal)!;
+        if (indices.length > 1) {
+          // Put the row-versus-invoice distinction first, especially on free items
+          // whose repeated Payment cell still displays the customer's full payment.
+          item.explanation =
+            `This product (Sales Source Row ${item.sourceRow}): allocated Bank Charges / Subsidy ₱${fixed(adjustment)}. ` +
+            (line.isZero()
+              ? 'This product has zero Line Total, so no invoice payment or charge is allocated to it. '
+              : '') +
+            `Invoice Bank Charges / Subsidy ₱${fixed(sum(paymentFees))} counted once. ` +
+            (allocationTrace
+              ? `Charges / subsidies recorded on: ${allocationTrace}. Find these products using the Sales Source Row column. `
+              : '') +
+            '\n' +
+            item.explanation;
+        }
         item.adjustment = fixed(adjustment);
         item.bank = [...new Set(a.filter((p) => p.rate !== null).map((p) => p.bank))].join(' / ');
         item.cardName = [...new Set(a.filter((p) => p.rate !== null).map((p) => p.cardName))].join(
           ' / ',
         );
-        const ratePairs = [
-          ...new Map(a.filter((p) => p.rate !== null).map((p) => [p.cardName, p])).values(),
-        ];
+        const ratePairs = a.filter((p) => p.rate !== null);
+        [item.appliedRate1, item.appliedRate2, item.appliedRate3] = [0, 1, 2].map(
+          (n) => ratePairs[n]?.rate ?? null,
+        );
+        const distinctRates = [...new Map(ratePairs.map((p) => [p.cardName, p])).values()];
         item.appliedRate =
-          ratePairs.length === 1
-            ? ratePairs[0].rate
-            : ratePairs.length
-              ? ratePairs.map((p) => p.cardName + ': ' + p.rate + '%').join('; ')
+          distinctRates.length === 1
+            ? distinctRates[0].rate
+            : distinctRates.length
+              ? distinctRates.map((p) => p.cardName + ': ' + p.rate + '%').join('; ')
               : null;
         if (item.totalCost !== null) {
           item.grossMargin = fixed(line.minus(item.totalCost).minus(adjustment));
@@ -439,43 +466,74 @@ export class CalculationService {
             item.grossMargin +
             '.';
         }
-        item.explanation +=
-          ' Net Line Total already includes discounts; discount was not deducted again.';
+        item.explanation += ` Row allocated Bank Charges / Subsidy: ₱${item.adjustment}. Net Line Total already includes discounts; discount was not deducted again.`;
         if (!item.issues.length)
           item.status = adjustment.isZero() ? 'No Bank Charge' : 'Calculated';
         else if (item.status === 'Calculated') item.status = 'Needs Review';
       });
     };
     for (const indices of groups.values()) {
+      indices.sort((a, b) => sales[a].source.row - sales[b].source.row || a - b);
       if (indices.some((i) => prepared[i].scope === 'invoice')) {
-        if (indices.some((i) => prepared[i].scope !== 'invoice' || prepared[i].error)) {
-          fail(indices, 'Incomplete invoice payment evidence across the Sales Report item rows.');
+        const reviewTriggers = indices.filter((i) => reviewPayment[i]);
+        if (reviewTriggers.length) {
+          routePaymentToReview(indices, reviewTriggers);
           continue;
         }
-        const signatures = new Set(
-          indices.map((i) =>
-            JSON.stringify(
-              prepared[i].parts
-                .map((p) => [
-                  normalize(p.method),
-                  money(p.amount)?.toFixed(2) ?? p.amount,
-                  normalize(p.reference),
-                ])
-                .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-            ),
-          ),
-        );
-        if (signatures.size !== 1) {
+        const evidence = indices.filter((i) => sales[i].payment.trim() || sales[i].payments.length);
+        if (
+          !evidence.length ||
+          evidence.some((i) => prepared[i].scope !== 'invoice' || prepared[i].error)
+        ) {
           fail(
             indices,
-            'Inconsistent invoice payment amounts repeated across product rows. Correct the Sales Report.',
+            'Incomplete invoice payment evidence across the Sales Report item rows. ' +
+              (evidence.length ? evidence : indices)
+                .map((i) => prepared[i].error)
+                .filter(Boolean)
+                .join(' '),
           );
           continue;
         }
-        process(indices, prepared[indices[0]].parts);
+        // Multiset union: a repeated invoice list counts once, while two identical
+        // entries within one list still count twice. Distinct card references stay
+        // distinct. Subsets and payment details present on only one row are supported.
+        const counts = new Map<string, number>(),
+          parts: PaymentPart[] = [];
+        // Prefer a complete list's payment order when another product only has a subset.
+        const orderedEvidence = [...evidence].sort(
+          (a, b) =>
+            prepared[b].parts.length - prepared[a].parts.length ||
+            sales[a].source.row - sales[b].source.row ||
+            a - b,
+        );
+        for (const i of orderedEvidence) {
+          const local = new Map<string, number>();
+          for (const p of prepared[i].parts) {
+            const description = paymentDescription(p.method);
+            const match = matchRate(p.method, configuration, p.description, sales[i].branch);
+            const key = JSON.stringify([
+              normalize(match.method?.cardName ?? description.method),
+              money(p.amount)?.toFixed(2) ?? p.amount,
+              normalize(p.reference || description.reference),
+            ]);
+            const count = (local.get(key) ?? 0) + 1;
+            local.set(key, count);
+            if (count > (counts.get(key) ?? 0)) {
+              counts.set(key, count);
+              parts.push(p);
+            }
+          }
+        }
+        process(
+          indices,
+          parts,
+          evidence.some((i) => prepared[i].parts.length === parts.length),
+        );
       } else
         for (const i of indices) {
-          if (prepared[i].error)
+          if (reviewPayment[i]) routePaymentToReview([i], [i]);
+          else if (prepared[i].error)
             fail(
               [i],
               prepared[i].error!,
@@ -490,6 +548,14 @@ export class CalculationService {
       subsidies = new Decimal(0),
       margin = new Decimal(0);
     items.forEach((item, index) => {
+      if (!item.cardName && !item.reviewOnly) {
+        item.reviewOnly = true;
+        item.issues.push(
+          'No payment method matches a bank rate in Configuration Settings. Moved to Needs Review; excluded from Sheet 1 and Sheet 2.',
+        );
+        if (item.status === 'Calculated' || item.status === 'Not Calculated')
+          item.status = 'Needs Review';
+      }
       if (item.adjustment === null && recognized[index].length) {
         item.explanation =
           'Recognized Tender: ' +
@@ -516,7 +582,7 @@ export class CalculationService {
             ? 'Included in Sheet 2: this row contributes its Line Total, Cost, Bank Charges / Subsidy and GrossMargin once.'
             : 'Excluded from Sheet 2: this row requires payment, cost, quantity, date or branch review; none of its amounts contribute to that summary.'
           : '',
-        ...item.issues.map(reportIssue),
+        ...item.issues,
         ...item.warnings,
         ...sales[index].notes,
       ]
@@ -593,7 +659,7 @@ export class CalculationService {
         product: i.product,
         sourceRow: i.sourceRow,
         status: i.status,
-        reason: [...i.issues.map(reportIssue), ...i.warnings].filter(Boolean).join(' '),
+        reason: [...i.issues, ...i.warnings].filter(Boolean).join(' '),
         source: i.source,
         original: sales[index].original,
       }))
@@ -619,7 +685,7 @@ export class CalculationService {
       calculatedAt: new Date().toISOString(),
       reportDates: [...new Set(sales.map((s) => s.date).filter(Boolean))].sort(),
       roundingPolicy:
-        'Decimal.js; PHP 2 decimals ROUND_HALF_UP. Explicit invoice payments counted once; each payment fee rounded first and allocated by largest remainder, ties in source row order. Negative rates are subsidies. One calculated record per source item; Item Bank Deductions displays only configured bank-payment matches.',
+        'Decimal.js; PHP 2 decimals ROUND_HALF_UP. Actual invoice payments counted once; each payment fee rounded first and allocated by positive Line Total using largest remainder, ties in source row order. Zero Line Totals receive no allocation. Negative rates are subsidies. No amount is inferred from Line Total.',
       summary: {
         sales: fixed(totalSales),
         charges: fixed(charges),

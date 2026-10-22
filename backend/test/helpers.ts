@@ -15,8 +15,16 @@ export function sale(values: Partial<Sale> = {}): Sale {
     lineTotal: '30000',
     payment: 'BDO 3 MOS',
     costBasis: 'unit',
-    payments: [],
-    paymentScope: 'invoice',
+    // Legacy arithmetic fixtures supply an explicit per-product paid amount.
+    // Parser/missing-amount tests pass payments: [] to exercise Payment alone.
+    payments:
+      values.payments ??
+      (values.payment === '' ||
+      /\bSPLIT\b|[+\n;|]|\s[/&]\s|\s[\d,]+\.\d{1,2}\s*$/i.test(values.payment ?? 'BDO 3 MOS')
+        ? []
+        : [part(values.payment ?? 'BDO 3 MOS', values.lineTotal ?? '30000')]),
+    paymentScope:
+      values.payments || /\s[\d,]+\.\d{1,2}\s*$/.test(values.payment ?? '') ? 'invoice' : 'line',
     paymentIssues: [],
     issues: [],
     warnings: [],
@@ -56,8 +64,8 @@ export function reportFixture(): Buffer {
         'Net Total',
         'Payment',
       ],
-      ['000123', 46296, 'ASUS', '0001', 'Laptop', 1, 30000, 25000, 0, 30000, 'BDO 3 MOS'],
-      ['000124', 46296, 'ASUS', '0002', 'Mouse', 2, 500, 300, 100, 900, 'Cash'],
+      ['000123', 46296, 'ASUS', '0001', 'Laptop', 1, 30000, 25000, 0, 30000, 'BDO 3 MOS 30,000.00'],
+      ['000124', 46296, 'ASUS', '0002', 'Mouse', 2, 500, 300, 100, 900, 'Cash 900.00'],
     ],
   });
 }

@@ -89,7 +89,7 @@ export class ExcelService {
   }
   private text(cell: XLSX.CellObject | undefined, formatted = false): string {
     if (!cell) return '';
-    if (cell.t === 'e') return '#EXCEL_ERROR';
+    if (cell.t === 'e') return cell.w || '#EXCEL_ERROR';
     if (cell.f && cell.v === undefined) return '#FORMULA_WITHOUT_CACHED_VALUE';
     // Use Excel's displayed text for invoice references, including numeric zero masks.
     if (formatted) return String(cell.w ?? XLSX.utils.format_cell(cell));
@@ -157,22 +157,32 @@ export class ExcelService {
       header = headerOverride - 1;
     }
     const seen = new Set<string>();
+    const originalHeaders: string[] = [];
     const headers = Array.from({ length: range.e.c + 1 }, (_, c) => {
       const raw =
         this.text(sheet[XLSX.utils.encode_cell({ r: header, c })])
           .replace(/\s+/g, ' ')
           .trim() || 'Column ' + XLSX.utils.encode_col(c);
+      originalHeaders.push(normalize(raw));
       let h = raw;
       while (seen.has(normalize(h))) h += ' [' + XLSX.utils.encode_col(c) + ']';
       seen.add(normalize(h));
       return h;
     });
     const mapping: Record<string, string> = {};
+    const ambiguousFields: string[] = [];
     for (const [key, aliases] of Object.entries(FIELDS)) {
-      const found = aliases
-        .map((a) => headers.find((h) => normalize(h) === normalize(a)))
-        .find(Boolean);
-      if (found) mapping[key] = found;
+      for (const alias of aliases) {
+        const indices = originalHeaders.flatMap((h, index) =>
+          h === normalize(alias) ? [index] : [],
+        );
+        if (!indices.length) continue;
+        if (indices.length === 1) mapping[key] = headers[indices[0]];
+        else ambiguousFields.push(key);
+        // Do not silently substitute another alias when the preferred heading
+        // occurs twice. Only the user can choose the intended source column.
+        break;
+      }
     }
     let recordCount = 0;
     const preview: SheetPreview['preview'] = [];
@@ -199,6 +209,7 @@ export class ExcelService {
       headers,
       preview,
       suggestedMapping: mapping,
+      ambiguousFields,
       suggestedCostBasis: this.costBasis(headers, mapping),
     };
   }
@@ -220,9 +231,29 @@ export class ExcelService {
         );
     if (new Set(REQUIRED.map((k) => mapping[k])).size !== REQUIRED.length)
       throw new BadRequestException('Required sales fields must use separate columns.');
-    for (const [key, value] of Object.entries(mapping))
+    for (const key of desc.ambiguousFields ?? [])
+      if (!mapping[key])
+        throw new BadRequestException(
+          'Duplicate column headings for "' + key + '". Select the intended source column.',
+        );
+    const mappedColumns = new Map<string, string>();
+    for (const [key, value] of Object.entries(mapping)) {
       if (value && (!Object.hasOwn(FIELDS, key) || !desc.headers.includes(value)))
         throw new BadRequestException('Invalid column mapping: ' + key);
+      if (!value) continue;
+      const previous = mappedColumns.get(value);
+      if (previous)
+        throw new BadRequestException(
+          'Sales fields must use separate columns: "' +
+            previous +
+            '" and "' +
+            key +
+            '" both use "' +
+            value +
+            '".',
+        );
+      mappedColumns.set(value, key);
+    }
     const sheet = loaded.workbook.Sheets[selection.sheet],
       range = XLSX.utils.decode_range(sheet['!ref'] || 'A1');
     const result: Sale[] = [];
@@ -252,7 +283,7 @@ export class ExcelService {
               ': cached formula value read; source workbook must be recalculated before upload.',
           );
         if (
-          ['invoice', 'product', 'date', 'payment'].includes(key) &&
+          ['invoice', 'product', 'branch', 'date', 'payment'].includes(key) &&
           (cell?.t === 'e' || (cell?.f && cell.v === undefined))
         )
           issues.push(

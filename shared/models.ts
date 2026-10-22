@@ -2,6 +2,8 @@ export interface PaymentMethod {
   bank: string;
   cardName: string;
   rate: string;
+  // Optional rate overrides keyed by branch name; the base rate remains the fallback.
+  branchRates?: Record<string, string>;
 }
 export interface Alias {
   alias: string;
@@ -34,6 +36,7 @@ export interface SheetPreview {
   headers: string[];
   preview: { sourceRow: number; cells: string[] }[];
   suggestedMapping: Record<string, string>;
+  ambiguousFields?: string[];
   suggestedCostBasis: 'unit' | 'line' | 'unknown';
 }
 export interface WorkbookPreview {
@@ -88,6 +91,9 @@ export interface ItemResult {
   bank: string;
   originalPaymentMethod: string;
   appliedRate: string | null;
+  appliedRate1: string | null;
+  appliedRate2: string | null;
+  appliedRate3: string | null;
   adjustment: string | null;
   grossMargin: string | null;
   partialCalculation: boolean;
@@ -98,6 +104,8 @@ export interface ItemResult {
   warnings: string[];
   issues: string[];
   totalCost: string | null;
+  // Payment selection rules can route an entire shared invoice to Needs Review.
+  reviewOnly?: boolean;
   source: Source;
 }
 // Tender is populated by the existing configuration matcher, including aliases and BNPL/SNPL.
@@ -105,10 +113,10 @@ export const hasConfiguredBankPayment = (item: Pick<ItemResult, 'cardName'>): bo
   item.cardName.trim().length > 0;
 export const hasNegativeQuantity = (item: Pick<ItemResult, 'quantity'>): boolean =>
   Number(item.quantity) < 0;
-// Negative quantities belong in Needs Review, while other matched items remain visible.
+// Use one selection rule for the Angular preview, Excel Sheet 1 and Sheet 2.
 export const showInItemBankDeductions = (
-  item: Pick<ItemResult, 'cardName' | 'quantity'>,
-): boolean => hasConfiguredBankPayment(item) && !hasNegativeQuantity(item);
+  item: Pick<ItemResult, 'cardName' | 'quantity' | 'reviewOnly'>,
+): boolean => hasConfiguredBankPayment(item) && !hasNegativeQuantity(item) && !item.reviewOnly;
 export const isBranchDateSummaryEligible = (
   item: ItemResult,
 ): item is ItemResult & {
@@ -118,6 +126,7 @@ export const isBranchDateSummaryEligible = (
   grossMargin: string;
 } =>
   showInItemBankDeductions(item) &&
+  hasConfiguredBankPayment(item) &&
   item.appliedRate !== null &&
   item.adjustment !== null &&
   item.totalCost !== null &&
@@ -204,8 +213,10 @@ export const ITEM_COLUMNS = [
   { header: 'Discount', key: 'discount', format: 'money' },
   { header: 'Line Total', key: 'lineTotal', format: 'money' },
   { header: 'Payment', key: 'originalPaymentMethod', format: 'text' },
-  { header: 'Applied Bank Rate', key: 'appliedRate', format: 'percent' },
-  { header: 'Bank Charges / Subsidy', key: 'adjustment', format: 'money' },
+  { header: 'Applied Bank Rate 1', key: 'appliedRate1', format: 'percent' },
+  { header: 'Applied Bank Rate 2', key: 'appliedRate2', format: 'percent' },
+  { header: 'Applied Bank Rate 3', key: 'appliedRate3', format: 'percent' },
+  { header: 'Total Bank Charges / Subsidy', key: 'adjustment', format: 'money' },
   { header: 'GrossMargin', key: 'grossMargin', format: 'money' },
   { header: 'Sales Source Row', key: 'sourceRow', format: 'number' },
   { header: 'Tender', key: 'cardName', format: 'text' },

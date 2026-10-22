@@ -36,16 +36,20 @@
   >
   <p>
     {{ result.summary.processedItems | number }} source rows processed ·
-    {{ matchedItemCount | number }} matched items shown ·
+    {{ matchedItemCount | number }} product rows shown ·
     {{ result.items.length - matchedItemCount | number }} items omitted from Item Bank Deductions ·
     {{ result.summary.feeCalculatedItems | number }} items with calculated charges ·
     {{ result.summary.missingProductIds | number }} missing Product IDs.
   </p>
   <p>
-    Item Bank Deductions shows only items with a matched configured bank payment in Tender.
-    Cash-only, other no-charge-only and unmatched items are omitted from this preview and Sheet 1.
-    Items with negative quantities are moved to Needs Review and excluded from all branch-and-date
-    totals. Missing or unconfigured payment details remain in Needs Review. BNPL/SNPL labels are
+    Sheet 1 shows products with payment methods matching Configuration Settings. Payments starting
+    with Cash or Charge, and rows with no configured bank match, go to Needs Review. A shared
+    invoice containing a Cash/Charge-first payment is held together for review. Multiple configured
+    payments are supported; each rate applies to its actual payment amount. Later cash or
+    unconfigured portions receive no bank charge. Repeated invoice payments are counted once and
+    charges are allocated by positive product Line Total; zero-value rows receive none. Items with
+    negative quantities are moved to Needs Review and excluded from all branch-and-date totals.
+    Missing, malformed or ambiguous payment details remain in Needs Review. BNPL/SNPL labels are
     ignored during matching unless explicitly configured; original Payment text is preserved. Cost
     shows total product cost: unit cost × quantity, or an already extended line cost. The original
     cost is preserved in Calculation Explanation. Rows marked “Included in Sheet 2” contribute to
@@ -155,7 +159,7 @@
 </div>
 <div class="pagination">
   <span
-    >{{ matchedItemCount | number }} matched items from {{ result.items.length | number }} source
+    >{{ matchedItemCount | number }} product rows from {{ result.items.length | number }} source
     products · Calculated {{ result.calculatedAt | date: 'medium' : '+0800' }}</span
   >
   <div>
@@ -165,7 +169,8 @@
   </div>
 </div>
 <p class="table-footnote">
-  The main worksheet contains only matched items in 17 columns, starting with Product ID. Payment
+  The main worksheet contains 19 columns, starting with Product ID. The first three matched rates
+  appear in payment order; all additional charges are included in the total and explanation. Payment
   copies the source text; Tender shows the matched configured card name. Prices, discounts and final
   net line totals come from the Sales Report. Cost shows calculated total product cost; its source
   value and basis remain in Calculation Explanation. Positive adjustments are charges; negative

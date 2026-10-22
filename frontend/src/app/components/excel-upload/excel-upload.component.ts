@@ -69,7 +69,12 @@ export class ExcelUploadComponent {
     payment: 'Payment details',
   };
   get missing() {
-    return this.required.some((k) => !this.controls[k]?.value);
+    return this.required.some((k) => !this.controls[k]?.value) || this.ambiguousMappings.length > 0;
+  }
+  get ambiguousMappings() {
+    return (this.selected()?.ambiguousFields ?? [])
+      .filter((key) => !this.controls[key]?.value)
+      .map((key) => this.labels[key]);
   }
   pick(event: Event) {
     const input = event.target as HTMLInputElement;

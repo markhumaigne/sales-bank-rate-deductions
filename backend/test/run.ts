@@ -20,6 +20,8 @@ import {
   Sale,
 } from '../../shared/models';
 import { sale, part, upload, workbook, reportFixture } from './helpers';
+import { paymentTests } from './payment-based';
+import { sourceIntegrityTests } from './source-integrity';
 const config = new ConfigService(),
   excel = new ExcelService(),
   calc = new CalculationService(),
@@ -204,29 +206,30 @@ test('Multiple products sharing an invoice remain separate, repeated payments co
   );
   assert.equal(r.summary.charges, '875.00');
 });
-test('Cash retains its source row with zero bank deductions and no bank rate or margin', async () => {
+test('Cash retains its source row in Needs Review with no calculated rate, charge or margin', async () => {
   const r = run([sale({ payment: 'Cash' })]);
   const item = r.items[0];
-  assert.equal(item.status, 'Not Calculated');
+  assert.equal(item.status, 'Needs Review');
   assert.equal(item.cardName, '');
   assert.equal(item.originalPaymentMethod, 'Cash');
   assert.equal(item.lineTotal, '30000');
   assert.equal(item.appliedRate, null);
-  assert.equal(item.adjustment, '0.00');
+  assert.equal(item.adjustment, null);
   assert.equal(item.grossMargin, null);
   assert.equal(r.summary.sales, '0.00');
   assert.equal(r.summary.grossMargin, '0.00');
   assert.equal(r.summary.feeCalculatedItems, 0);
   assert.equal(r.summary.processedItems, 1);
-  assert.equal(r.summary.reviewCount, 0);
+  assert.equal(r.summary.reviewCount, 1);
   assert.equal(r.bankSummary[0].processedItems, 1);
-  assert.equal(r.bankSummary[0].reviewCount, 0);
-  assert.match(item.explanation, /No configured card matches/);
+  assert.equal(r.bankSummary[0].reviewCount, 1);
+  assert.match(item.explanation, /Payment starts with CASH/);
   const book = new ExcelJS.Workbook();
   await book.xlsx.load((await exporter.report(r)) as any);
   const ws = book.worksheets[0];
-  assert.equal(ws.rowCount, 1, 'Cash-only rows are omitted from Item Bank Deductions');
-  assert.equal(ws.columnCount, 17);
+  assert.equal(ws.rowCount, 1, 'Cash-only rows move to Needs Review');
+  assert.equal(book.getWorksheet('Needs Review')!.rowCount, 2);
+  assert.equal(ws.columnCount, 19);
 });
 
 test('Cash-only gifts do not create negative margins and adjacent matched BDO rows still calculate', () => {
@@ -258,7 +261,7 @@ test('Cash-only gifts do not create negative margins and adjacent matched BDO ro
   for (const item of r.items.slice(0, 2)) {
     assert.equal(item.cardName, '');
     assert.equal(item.appliedRate, null);
-    assert.equal(item.adjustment, '0.00');
+    assert.equal(item.adjustment, null);
     assert.equal(item.grossMargin, null);
     assert.doesNotMatch(item.explanation, /Gross Margin =/);
   }
@@ -269,7 +272,7 @@ test('Cash-only gifts do not create negative margins and adjacent matched BDO ro
   assert.equal(r.summary.sales, '33999.00');
   assert.equal(r.summary.grossMargin, '2766.03');
   assert.equal(r.summary.processedItems, 3);
-  assert.equal(r.summary.reviewCount, 0);
+  assert.equal(r.summary.reviewCount, 2);
 });
 
 test('Line-specific Cash is not calculated just because another product on the invoice has a card', () => {
@@ -277,7 +280,7 @@ test('Line-specific Cash is not calculated just because another product on the i
   assert.equal(r.items[0].adjustment, '1050.00');
   assert.equal(r.items[1].cardName, '');
   assert.equal(r.items[1].appliedRate, null);
-  assert.equal(r.items[1].adjustment, '0.00');
+  assert.equal(r.items[1].adjustment, null);
   assert.equal(r.items[1].grossMargin, null);
   assert.equal(r.summary.grossMargin, '3950.00');
 });
@@ -293,8 +296,8 @@ test('An explicitly configured zero-percent card remains eligible for calculatio
 });
 test('Unknown payment method never fabricates a rate or financial totals', () => {
   const r = run([sale({ payment: 'Unknown' })]);
-  assert.equal(r.items[0].status, 'Missing Bank Rate');
-  assert.equal(r.items[0].adjustment, null);
+  assert.equal(r.items[0].status, 'Needs Review');
+  assert.equal(r.items[0].adjustment, '0.00');
   assert.equal(r.summary.sales, '0.00');
   assert.equal(r.reviews.length, 1);
   assert.equal(r.items[0].cardName, '');
@@ -330,8 +333,8 @@ test('Matched Tender calculates its rate, charge and margin despite another unco
     assert.equal(item.cardName, 'BDO STRAIGHT');
     assert.equal(item.originalPaymentMethod, payment);
     assert.equal(item.appliedRate, '2.85');
-    assert.equal(item.partialCalculation, true);
-    assert.match(item.explanation, /Partial calculation/);
+    assert.equal(item.partialCalculation, false);
+    assert.match(item.explanation, /No matching configured rate/);
     assert.match(item.explanation, /SBC QRPH/);
   }
   assert.deepEqual(
@@ -342,18 +345,18 @@ test('Matched Tender calculates its rate, charge and margin despite another unco
     r.items.map((i) => i.grossMargin),
     ['-238.00', '21707.78'],
   );
-  assert.equal(r.summary.charges, '0.00');
-  assert.equal(r.summary.sales, '0.00');
-  assert.equal(r.summary.grossMargin, '0.00');
-  assert.equal(r.summary.partialCalculationItems, 2);
-  assert.equal(r.summary.reviewCount, 2);
+  assert.equal(r.summary.charges, '1282.22');
+  assert.equal(r.summary.sales, '47990.00');
+  assert.equal(r.summary.grossMargin, '21469.78');
+  assert.equal(r.summary.partialCalculationItems, 0);
+  assert.equal(r.summary.reviewCount, 0);
   const b = new ExcelJS.Workbook();
   await b.xlsx.load((await exporter.report(r)) as any);
-  assert.equal(b.worksheets[0].getCell('P2').value, 'BDO STRAIGHT');
+  assert.equal(b.worksheets[0].getCell('R2').value, 'BDO STRAIGHT');
   assert.equal(b.worksheets[0].getCell('K2').value, payment);
   assert.equal(b.worksheets[0].getCell('L2').value, 0.0285);
-  assert.equal(b.worksheets[0].getCell('M2').value, 0);
-  assert.equal(b.worksheets[0].getCell('N2').value, -238);
+  assert.equal(b.worksheets[0].getCell('O2').value, 0);
+  assert.equal(b.worksheets[0].getCell('P2').value, -238);
 });
 
 test('SBC QRPH is excluded from charges while matched BDO payments calculate rate, fee and margin', async () => {
@@ -408,23 +411,23 @@ test('SBC QRPH is excluded from charges while matched BDO payments calculate rat
   const b = new ExcelJS.Workbook();
   await b.xlsx.load((await exporter.report(r)) as any);
   assert.equal(b.worksheets[0].getCell('L2').value, 0.0285);
-  assert.equal(b.worksheets[0].getCell('M2').value, 0);
-  assert.equal(b.worksheets[0].getCell('N2').value, -238);
-  assert.equal(b.worksheets[0].getCell('M3').value, 1282.22);
+  assert.equal(b.worksheets[0].getCell('O2').value, 0);
+  assert.equal(b.worksheets[0].getCell('P2').value, -238);
+  assert.equal(b.worksheets[0].getCell('O3').value, 1282.22);
   assert.deepEqual(
     exporter.import(upload(Buffer.from(await b.xlsx.writeBuffer()))),
     r.configuration,
   );
 });
 
-test('SBC QRPH-only items retain their source values but are omitted from Sheet 1', async () => {
+test('Unconfigured SBC QRPH-only items retain their source values in Needs Review', async () => {
   for (const payment of ['SBC QRPH', ' sbc   qrph ', 'SBC QRPH 30,000.00']) {
     const r = run([sale({ payment })]);
     const item = r.items[0];
     assert.equal(item.originalPaymentMethod, payment);
     assert.equal(item.cardName, '');
     assert.equal(item.appliedRate, null);
-    assert.equal(item.adjustment, null);
+    assert.equal(item.adjustment, '0.00');
     assert.equal(item.grossMargin, null);
     assert.equal(r.summary.feeCalculatedItems, 0);
     assert.equal(r.summary.marginCalculatedItems, 0);
@@ -434,7 +437,8 @@ test('SBC QRPH-only items retain their source values but are omitted from Sheet 
     await book.xlsx.load((await exporter.report(r)) as any);
     const ws = book.worksheets[0];
     assert.equal(ws.rowCount, 1);
-    assert.equal(ws.columnCount, 17);
+    assert.equal(book.getWorksheet('Needs Review')!.rowCount, 2);
+    assert.equal(ws.columnCount, 19);
   }
 });
 
@@ -442,7 +446,7 @@ test('No-charge SBC QRPH stays exact and never hides missing splits, costs or ot
   const qr = run([sale({ payment: ' sbc   qrph ' })]);
   assert.equal(qr.items[0].cardName, '');
   assert.equal(qr.items[0].appliedRate, null);
-  assert.equal(qr.items[0].adjustment, null);
+  assert.equal(qr.items[0].adjustment, '0.00');
   assert.equal(qr.items[0].grossMargin, null);
   const text = run([sale({ payment: 'BDO 3 MOS 20,000.00\nSBC QRPH 10,000.00' })]);
   assert.equal(text.items[0].appliedRate, '3.50');
@@ -461,12 +465,12 @@ test('No-charge SBC QRPH stays exact and never hides missing splits, costs or ot
   ]);
   assert.equal(partial.items[0].adjustment, '700.00');
   assert.equal(partial.items[0].grossMargin, '4300.00');
-  assert.equal(partial.items[0].partialCalculation, true);
-  assert.equal(partial.summary.charges, '0.00');
-  assert.equal(run([sale({ payment: 'SBC QRPH PROMO' })]).items[0].adjustment, null);
+  assert.equal(partial.items[0].partialCalculation, false);
+  assert.equal(partial.summary.charges, '700.00');
+  assert.equal(run([sale({ payment: 'SBC QRPH PROMO' })]).items[0].adjustment, '0.00');
 });
 
-test('Single matched Payment description calculates all three values using its net line amount', () => {
+test('Single matched description with an explicit line payment calculates fee and margin', () => {
   const r = run([sale({ payment: 'BDO STRAIGHT EXAMPLE CUSTOMER' })]);
   assert.equal(r.items[0].cardName, 'BDO STRAIGHT');
   assert.equal(r.items[0].originalPaymentMethod, 'BDO STRAIGHT EXAMPLE CUSTOMER');
@@ -555,6 +559,111 @@ test('Branches and repeated invoice references remain independent', () => {
   assert.equal(r.bankSummary.length, 2);
   assert.equal(r.summary.charges, '2100.00');
 });
+test('Source branches stay with their product rows through invoice allocation and both exported sheets', async () => {
+  const rows: unknown[][] = Array.from({ length: 2191 }, () => []);
+  rows[0] = [
+    'Product ID',
+    'Date',
+    'Branch',
+    'TM-INV#',
+    'Product Name',
+    'Qty',
+    'Price',
+    'Unit Cost',
+    'Discount',
+    'Net Total',
+    'Payment',
+  ];
+  const invoice = '3013-00031835';
+  const payment = 'CC#1531 Unionbank 3 Mos SAMPLE CUSTOMER 6,999.00';
+  // The same invoice and SKU can occur at another branch. Neither identifies a
+  // product row by itself, and configuration list order never assigns branches.
+  rows[1] = [
+    '4123456761920',
+    '10/01/2026',
+    'SM CALAMBA',
+    invoice,
+    'Other branch phone',
+    1,
+    1000,
+    800,
+    0,
+    1000,
+    'CC#9999 Unionbank 3 Mos OTHER CUSTOMER 1,000.00',
+  ];
+  for (const [sourceRow, id, product, net, cost] of [
+    [1027, '4031000060240', 'ITECH SMALL BAG', 0, 8],
+    [1128, '6957013600632', 'KINGLEEN I1921 3.5MM EARPHONE (WHITE/BLACK)', 0, 36],
+    [2191, '4123456761920', 'XIAOMI REDMI A7 PRO 4GB+64GB (PALM GREEN)', 6999, 5095.09],
+  ] as const) {
+    rows[sourceRow - 1] = [
+      id,
+      '10/01/2026',
+      'SM SEASIDE',
+      invoice,
+      product,
+      1,
+      net,
+      cost,
+      0,
+      net,
+      payment,
+    ];
+  }
+  const sales = parse(workbook({ 'Sales Report': rows }));
+  const settings = config.defaults();
+  settings.branches = ['SM CALAMBA', 'SM SEASIDE'];
+  settings.paymentMethods.find((m) => m.cardName === 'UNIONBANK 3 MOS')!.branchRates = {
+    'SM CALAMBA': '5.00',
+  };
+  const result = calc.calculate(sales, settings);
+  assert.deepEqual(result.reviews, []);
+  assert.deepEqual(
+    result.items.map((item) => [item.sourceRow, item.branch, item.productId, item.adjustment]),
+    [
+      [2, 'SM CALAMBA', '4123456761920', '50.00'],
+      [1027, 'SM SEASIDE', '4031000060240', '0.00'],
+      [1128, 'SM SEASIDE', '6957013600632', '0.00'],
+      [2191, 'SM SEASIDE', '4123456761920', '244.97'],
+    ],
+  );
+  assert.deepEqual(result.branchDateSummary, [
+    {
+      date: '2026-10-01',
+      branch: 'SM CALAMBA',
+      sales: '1000.00',
+      totalCost: '800.00',
+      adjustment: '50.00',
+      grossMargin: '150.00',
+    },
+    {
+      date: '2026-10-01',
+      branch: 'SM SEASIDE',
+      sales: '6999.00',
+      totalCost: '5139.09',
+      adjustment: '244.97',
+      grossMargin: '1614.94',
+    },
+  ]);
+  const book = new ExcelJS.Workbook();
+  await book.xlsx.load((await exporter.report(result)) as any);
+  const detail = book.getWorksheet('Item Bank Deductions')!;
+  for (const [index, item] of result.items.entries()) {
+    assert.equal(detail.getCell(index + 2, 1).value, item.productId);
+    assert.equal(detail.getCell(index + 2, 3).value, sales[index].original.branch);
+    assert.equal(detail.getCell(index + 2, 4).value, invoice);
+    assert.equal(detail.getCell(index + 2, 17).value, item.sourceRow);
+  }
+  const summary = book.getWorksheet(BRANCH_DATE_SUMMARY_SHEET)!;
+  for (const [index, group] of result.branchDateSummary.entries()) {
+    assert.equal(summary.getCell(index + 3, 2).value, group.branch);
+    assert.equal(summary.getCell(index + 3, 3).value, Number(group.sales));
+    assert.equal(summary.getCell(index + 3, 4).value, Number(group.totalCost));
+    assert.equal(summary.getCell(index + 3, 5).value, Number(group.adjustment));
+    assert.equal(summary.getCell(index + 3, 6).value, Number(group.grossMargin));
+  }
+});
+
 test('BNPL/SNPL Tender descriptions match underlying methods and retain original Payment', () => {
   for (const [payment, fee] of [
     ['BDO 6 MOS BNPL', '1800.00'],
@@ -577,7 +686,7 @@ test('Split payment without explicit amounts stays unresolved', () => {
   const r = run([sale({ payment: 'Cash + BDO 3 MOS' })]);
   assert.equal(r.items[0].status, 'Needs Review');
   assert.equal(r.items[0].adjustment, null);
-  assert.match(r.items[0].explanation, /Split payment/);
+  assert.match(r.items[0].explanation, /invalid or missing actual payment amount/);
 });
 test('BNPL/SNPL normalization preserves existing rates, costs and margins for all label positions', () => {
   for (const [payment, underlying] of [
@@ -636,7 +745,7 @@ test('Explicit BNPL/SNPL methods, aliases and patterns override fallback without
     [sale({ payment: 'BDO 6 MOS SNPL CUSTOMER' })],
     config.validate(cfg),
   );
-  assert.equal(ambiguous.items[0].adjustment, null);
+  assert.equal(ambiguous.items[0].adjustment, '0.00');
   assert.match(ambiguous.reviews[0].reason, /Ambiguous/);
   assert.deepEqual(ambiguous.branchDateSummary, []);
 });
@@ -659,7 +768,7 @@ test('Label removal supports configured aliases and patterns without inventing a
     'BDO 6 MOS BNPL PROMO',
   ]) {
     const r = run([sale({ payment })]);
-    assert.equal(r.items[0].adjustment, null, payment);
+    assert.equal(r.items[0].adjustment, '0.00', payment);
     assert.equal(r.items[0].grossMargin, null);
     assert.equal(r.reviews.length, 1);
     assert.deepEqual(r.branchDateSummary, []);
@@ -671,7 +780,7 @@ test('Label removal supports configured aliases and patterns without inventing a
   });
   assert.equal(
     calc.calculate([sale({ payment: 'BDO 6 MOS' })], onlyVariant).items[0].adjustment,
-    null,
+    '0.00',
   );
 });
 test('Cash and Cash Payment cannot acquire charges from names, aliases or wildcard settings', () => {
@@ -693,7 +802,7 @@ test('Cash and Cash Payment cannot acquire charges from names, aliases or wildca
     'Cash Payment 30,000.00',
   ]) {
     const r = calc.calculate([sale({ payment })], config.validate(cfg));
-    assert.equal(r.items[0].adjustment, '0.00', payment);
+    assert.equal(r.items[0].adjustment, /^\s*Cash\b/i.test(payment) ? null : '0.00', payment);
     assert.equal(r.items[0].appliedRate, null);
     assert.equal(r.items[0].grossMargin, null);
     assert.equal(r.items[0].cardName, '');
@@ -702,7 +811,7 @@ test('Cash and Cash Payment cannot acquire charges from names, aliases or wildca
     assert.equal(r.summary.subsidies, '0.00');
     assert.equal(r.summary.sales, '0.00');
     assert.equal(r.summary.feeCalculatedItems, 0);
-    assert.equal(r.reviews.length, 0);
+    assert.equal(r.reviews.length, 1);
     assert.deepEqual(r.branchDateSummary, []);
   }
   const split = calc.calculate(
@@ -733,7 +842,7 @@ test('Broad bank patterns cannot charge cash portions or unresolved combined pay
   assert.equal(r.items[0].partialCalculation, false);
   const unresolved = calc.calculate([sale({ payment: 'BDO 3 MOS BNPL + Cash Payment' })], cfg);
   assert.equal(unresolved.items[0].adjustment, null);
-  assert.match(unresolved.items[0].explanation, /Split payment has no reliable/);
+  assert.match(unresolved.items[0].explanation, /invalid or missing actual payment amount/);
   assert.deepEqual(unresolved.branchDateSummary, []);
 });
 
@@ -811,18 +920,18 @@ test('Sales-only Tender groups preserve labels and reconcile BNPL/SNPL fees acro
   const main = b.worksheets[0],
     summary = b.worksheets[1];
   assert.equal(main.rowCount, 3, 'Repeated payment evidence never duplicates products');
-  assert.equal(main.columnCount, 17);
+  assert.equal(main.columnCount, 19);
   for (const row of [2, 3]) {
     assert.equal(main.getCell(row, 11).value, payment);
-    assert.equal(main.getCell(row, 16).value, 'BDO 6 MOS / BPI 3 MOS');
-    assert.match(String(main.getCell(row, 17).value), /Original payment\/tender: "BNPL BDO 6 MOS"/);
-    assert.match(String(main.getCell(row, 17).value), /Original payment\/tender: "BPI 3 MOS SNPL"/);
+    assert.equal(main.getCell(row, 18).value, 'BDO 6 MOS / BPI 3 MOS');
+    assert.match(String(main.getCell(row, 19).value), /Original payment\/tender: "BNPL BDO 6 MOS"/);
+    assert.match(String(main.getCell(row, 19).value), /Original payment\/tender: "BPI 3 MOS SNPL"/);
   }
   assert.equal(summary.columnCount, 6);
   for (const [itemCol, summaryCol] of [
     [10, 3],
-    [13, 5],
-    [14, 6],
+    [15, 5],
+    [16, 6],
   ])
     assert.equal(
       summary.getCell(3, summaryCol).value,
@@ -880,8 +989,8 @@ test('PAYMAYA DEBIT with cash uses the configured rate on the card portion exact
     const book = new ExcelJS.Workbook();
     await book.xlsx.load((await exporter.report(r)) as any);
     assert.equal(book.worksheets[0].getCell('K2').value, payment);
-    assert.equal(book.worksheets[0].getCell('M2').value, 96);
-    assert.equal(book.worksheets[0].getCell('M3').value, 48);
+    assert.equal(book.worksheets[0].getCell('O2').value, 96);
+    assert.equal(book.worksheets[0].getCell('O3').value, 48);
     assert.equal(book.worksheets[1].getCell('E3').value, 144);
     const cfg = c();
     cfg.paymentMethods.find((m) => m.cardName === 'PAYMAYA DEBIT')!.rate = '3.00';
@@ -939,7 +1048,7 @@ test('PAYMAYA and cash tender with change calculates from Sales Report inputs an
       item.explanation,
       /Cash tender ₱3000.00 includes ₱5.00 change; net cash payment ₱2995.00/,
     );
-    assert.match(item.explanation, /Eligible payment ₱6000.00/);
+    assert.match(item.explanation, /Actual customer payment ₱6000.00/);
     assert.equal(r.summary.sales, '8995.00');
     assert.equal(r.summary.charges, '144.00');
     assert.deepEqual(r.branchDateSummary, [
@@ -957,8 +1066,8 @@ test('PAYMAYA and cash tender with change calculates from Sales Report inputs an
     const main = book.getWorksheet('Item Bank Deductions')!;
     assert.equal(main.getCell('K2').value, payment);
     assert.equal(main.getCell('L2').value, 0.024);
-    assert.equal(main.getCell('M2').value, 144);
-    assert.equal(main.getCell('N2').value, 1851);
+    assert.equal(main.getCell('O2').value, 144);
+    assert.equal(main.getCell('P2').value, 1851);
     assert.deepEqual(
       (book.worksheets[1].getRow(3).values as unknown[]).slice(3),
       [8995, 7000, 144, 1851],
@@ -1058,7 +1167,7 @@ test('Cash change never reduces bank amounts, invents cash or resolves unknown a
 test('Combined methods inside descriptions are not mistaken for a single card payment', () => {
   for (const method of ['BDO 3 MOS / Cash', 'BDO STRAIGHT & Cash']) {
     const r = run([sale({ payments: [part(method, '30000')] })]);
-    assert.equal(r.items[0].adjustment, null);
+    assert.equal(r.items[0].adjustment, '0.00');
     assert.equal(r.summary.charges, '0.00');
   }
 });
@@ -1307,9 +1416,9 @@ test('An explicitly configured BDO PAY to BDO STRAIGHT alias calculates each pay
   assert.equal(items.rowCount, 3);
   assert.equal(items.getCell('K2').value, payment);
   assert.equal(items.getCell('L2').value, 0.0285);
-  assert.equal(items.getCell('M2').value, 35.63);
-  assert.equal(items.getCell('N2').value, 96.37);
-  assert.equal(items.getCell('P2').value, 'BDO STRAIGHT');
+  assert.equal(items.getCell('O2').value, 35.63);
+  assert.equal(items.getCell('P2').value, 96.37);
+  assert.equal(items.getCell('R2').value, 'BDO STRAIGHT');
   assert.equal(summary.columnCount, 6);
   assert.deepEqual(
     (summary.getRow(3).values as unknown[]).slice(3),
@@ -1357,8 +1466,8 @@ test('BDO PAY uses the editable configured rate and requires a configured target
     (method) => !['BDO STRAIGHT', 'BDO PAY/CASA'].includes(method.cardName),
   );
   const unresolved = calc.calculate([sale({ payment: 'BDO PAY' })], config.validate(cfg));
-  assert.equal(unresolved.items[0].status, 'Missing Bank Rate');
-  assert.equal(unresolved.items[0].adjustment, null);
+  assert.equal(unresolved.items[0].status, 'Needs Review');
+  assert.equal(unresolved.items[0].adjustment, '0.00');
   assert.deepEqual(unresolved.branchDateSummary, []);
   assert.equal(unresolved.reviews.length, 1);
 });
@@ -1413,7 +1522,7 @@ test('Automatic aliases preserve explicit methods, aliases, patterns, no-charge 
     assert.deepEqual(r.configuration, validated, rule);
     assert.equal(
       r.items[0].adjustment,
-      rule === 'method' ? '12.50' : rule === 'alias' || rule === 'pattern' ? '35.00' : null,
+      rule === 'method' ? '12.50' : rule === 'alias' || rule === 'pattern' ? '35.00' : '0.00',
       rule,
     );
     if (rule === 'ambiguous') assert.match(r.reviews[0].reason, /Ambiguous/);
@@ -1490,87 +1599,18 @@ test('Inconsistent or short invoice payment evidence never invents a missing por
   assert.ok(run([a, b]).items.every((i) => i.adjustment === null));
   assert.equal(run([sale({ payments: [part('BDO 3 MOS', '20000')] })]).items[0].adjustment, null);
 });
-test('Requested warning text is hidden without removing rows, resolving payments or hiding other warnings', async () => {
-  const variants: Partial<Sale>[] = [
-    { payment: 'Charge' },
-    {
-      payment: 'BDO 3 MOS 9,000.00\nCharge 500.00\nOther 500.00',
-      lineTotal: '10000',
-      cost: '7000',
-    },
-    {
-      payment: 'BDO 6 MOS',
-      lineTotal: '9800',
-      price: '10000',
-      discount: '200',
-      payments: [part('BDO 6 MOS', '10000')],
-    },
-    { payment: 'BDO 6 MOS', lineTotal: '10200', payments: [part('BDO 6 MOS', '10000')] },
-    { payment: 'BDO 6 MOS BNPL', quantity: '-1', lineTotal: '-100' },
-    { payment: 'BDO 6 MOS', lineTotal: '1000', cost: '800' },
-  ];
-  const rows = variants.map((variant, i) =>
-    sale({
-      ...variant,
-      invoice: 'INV-' + i,
-      productId: 'ITEM-' + i,
-      source: { file: 'sales.xlsx', sheet: 'Sales Report', row: i + 2 },
-    }),
-  );
-  const originals = structuredClone(rows);
-  const r = run(rows);
-  const hidden =
-    /"Charge": Unknown payment method or missing configured bank rate\.|Invoice payment discrepancy:/;
-  assert.equal(r.items.length, rows.length);
-  assert.equal(r.reviews.length, 5);
-  for (const item of r.items) assert.doesNotMatch(item.explanation, hidden);
-  for (const review of r.reviews) assert.doesNotMatch(review.reason, hidden);
-  assert.match(r.items[0].issues.join(' '), hidden, 'Original diagnostics remain available');
-  assert.equal(r.items[0].status, 'Missing Bank Rate');
+test('Unreconciled payment warnings remain visible in explanations and exported review details', async () => {
+  const r = run([sale({ payments: [part('BDO 6 MOS', '10000')], lineTotal: '9800' })]);
   assert.equal(r.items[0].adjustment, null);
-  assert.equal(r.items[1].partialCalculation, true);
-  assert.equal(r.items[1].adjustment, '315.00');
-  assert.match(r.items[1].explanation, /"Other": Unknown payment method/);
-  assert.match(r.reviews[1].reason, /"Other": Unknown payment method/);
-  for (const item of r.items.slice(2, 4)) {
-    assert.equal(item.status, 'Needs Review');
-    assert.equal(item.adjustment, null, 'Hiding a discrepancy never calculates its charge');
-    assert.equal(item.grossMargin, null);
-    assert.match(item.issues.join(' '), /Invoice payment discrepancy:/);
-  }
-  assert.match(
-    r.items[2].issues.join(' '),
-    /explicit payments 10000.00 versus net product sales 9800.00 \(difference 200.00\)/,
-  );
-  assert.match(r.items[3].issues.join(' '), /difference -200.00/);
-  assert.match(r.items[4].explanation, /Negative sales \/ refund/);
-  assert.match(r.reviews[4].reason, /Negative quantity \/ return/);
-  assert.equal(r.summary.sales, '1000.00');
-  assert.equal(r.summary.charges, '60.00');
-  assert.equal(r.branchDateSummary[0].grossMargin, '140.00');
-  const snapshot = structuredClone(r);
+  assert.match(r.items[0].explanation, /Invoice payment discrepancy:.*10000.00.*9800.00/);
+  assert.match(r.reviews[0].reason, /Invoice payment discrepancy:/);
   const book = new ExcelJS.Workbook();
   await book.xlsx.load((await exporter.report(r)) as any);
-  const main = book.getWorksheet('Item Bank Deductions')!;
-  assert.equal(main.rowCount, 5, 'Matched items remain except negative quantities moved to review');
-  assert.equal(main.getCell('K2').value, rows[1].payment);
-  assert.equal(main.getCell('M2').value, 315);
-  assert.equal(main.getCell('M3').value, null);
-  assert.equal(main.getCell('J3').value, 9800);
-  assert.equal(main.getCell('I3').value, 200);
-  assert.equal(main.getCell('A5').value, 'ITEM-5');
-  assert.equal(main.getCell('F5').value, 1);
-  assert.equal(main.getCell('J5').value, 1000);
-  for (let row = 2; row <= main.rowCount; row++)
-    assert.doesNotMatch(String(main.getCell(row, 17).value ?? ''), hidden);
-  const review = book.getWorksheet('Needs Review')!;
-  assert.equal(review.rowCount, 6);
-  for (let row = 2; row <= review.rowCount; row++)
-    assert.doesNotMatch(String(review.getCell(row, 8).value ?? ''), hidden);
-  assert.match(String(review.getCell('H3').value), /"Other": Unknown payment method/);
-  assert.match(String(review.getCell('H6').value), /Negative sales \/ refund/);
-  assert.deepEqual(r, snapshot);
-  assert.deepEqual(rows, originals);
+  assert.match(String(book.worksheets[0].getCell('S2').value), /Invoice payment discrepancy:/);
+  assert.match(
+    String(book.getWorksheet('Needs Review')!.getCell('H2').value),
+    /Invoice payment discrepancy:/,
+  );
 });
 
 test('Text payment evidence with explicit amounts is parsed without duplicating invoice payments', () => {
@@ -1637,7 +1677,7 @@ test('Negative BDO 6 MOS quantities move to review with original source values a
   const main = book.getWorksheet('Item Bank Deductions')!;
   assert.equal(main.rowCount, 2, 'Only the valid positive-quantity item remains on Sheet 1');
   assert.equal(main.getCell('A2').value, r.items[5].productId);
-  assert.equal(main.getCell('M2').value, 1800);
+  assert.equal(main.getCell('O2').value, 1800);
   const review = book.getWorksheet('Needs Review')!;
   for (let i = 0; i < negativeItems.length; i++) {
     const row = review.getRow(i + 2);
@@ -1699,7 +1739,7 @@ test('Negative quantities exclude positive prices and costs while valid losses a
   await book.xlsx.load((await exporter.report(r)) as any);
   assert.equal(book.worksheets[0].rowCount, 2);
   assert.equal(book.worksheets[0].getCell('A2').value, 'ITEM-0');
-  assert.equal(book.worksheets[0].getCell('N2').value, -18);
+  assert.equal(book.worksheets[0].getCell('P2').value, -18);
   assert.equal(book.getWorksheet('Needs Review')!.rowCount, 5);
   assert.deepEqual(
     (book.worksheets[1].getRow(3).values as unknown[]).slice(3),
@@ -1726,7 +1766,13 @@ test('Refund warnings distinguish shared invoice holds from independently calcul
   assert.equal(separate.items[0].adjustment, null);
   assert.equal(separate.items[1].adjustment, '1800.00');
   assert.deepEqual(separate.items[1].issues, []);
-  const shared = run(rows.map((row) => ({ ...row, payments: [part('BDO 6 MOS', '20000')] })));
+  const shared = run(
+    rows.map((row) => ({
+      ...row,
+      paymentScope: 'invoice' as const,
+      payments: [part('BDO 6 MOS', '20000')],
+    })),
+  );
   assert.ok(shared.items.every((item) => item.adjustment === null && item.grossMargin === null));
   assert.match(shared.items[0].explanation, /Negative sales \/ refund/);
   assert.doesNotMatch(
@@ -1828,9 +1874,10 @@ test('Sheet 2 groups and sorts dates/branches and reconciles every amount to eli
           500,
           'Unknown method',
         ],
-      ],
+      ].map((row, index) => (index === 0 ? [...row, 'Line Payment Amount'] : [...row, row[9]])),
     }),
   );
+  rows.forEach((row) => (row.paymentScope = 'line'));
   const r = run(rows);
   assert.deepEqual(r.branchDateSummary, [
     {
@@ -1862,8 +1909,8 @@ test('Sheet 2 groups and sorts dates/branches and reconciles every amount to eli
   await b.xlsx.load((await exporter.report(r)) as any);
   const main = b.worksheets[0],
     summary = b.worksheets[1];
-  assert.equal(main.columnCount, 17);
-  assert.equal(main.rowCount, 5, 'Only the four configured bank-payment products are exported');
+  assert.equal(main.columnCount, 19);
+  assert.equal(main.rowCount, 5, 'Only products with configured bank payments remain on Sheet 1');
   assert.equal(main.getCell('H4').value, 120, 'Sheet 1 displays total cost for quantity 2');
   assert.equal(summary.name, 'Gross Margin by Branch & Date');
   assert.equal(summary.columnCount, 6);
@@ -1893,8 +1940,8 @@ test('Sheet 2 groups and sorts dates/branches and reconciles every amount to eli
     for (const product of products) {
       totals[0] = totals[0].plus(String(product.getCell(10).value));
       totals[1] = totals[1].plus(String(product.getCell(8).value));
-      totals[2] = totals[2].plus(String(product.getCell(13).value));
-      totals[3] = totals[3].plus(String(product.getCell(14).value));
+      totals[2] = totals[2].plus(String(product.getCell(15).value));
+      totals[3] = totals[3].plus(String(product.getCell(16).value));
     }
     assert.equal((data.getCell(1).value as Date).toISOString(), group.date + 'T00:00:00.000Z');
     assert.equal(data.getCell(1).numFmt, 'dd mmm yyyy');
@@ -1910,7 +1957,7 @@ test('Sheet 2 groups and sorts dates/branches and reconciles every amount to eli
   );
   assert.deepEqual(exporter.import(upload(Buffer.from(await b.xlsx.writeBuffer()))), c());
 });
-test('Sheet 2 excludes cash, unconfigured, partial and incomplete items while retaining the source audit', () => {
+test('Sheet 2 excludes no-card and incomplete items while retaining the source audit', () => {
   const r = run([
     sale(),
     sale({ payment: 'Cash' }),
@@ -1932,18 +1979,21 @@ test('Sheet 2 excludes cash, unconfigured, partial and incomplete items while re
   ]);
   assert.equal(r.items.length, 14);
   assert.equal(r.items[6].adjustment, '1050.00', 'Missing cost retains its Sheet 1 fee');
-  assert.equal(r.items[11].grossMargin, '4300.00', 'Partial margin remains visible on Sheet 1');
-  assert.ok(r.items[11].partialCalculation);
+  assert.equal(
+    r.items[11].grossMargin,
+    '4300.00',
+    'Matched-payment margin remains visible on Sheet 1',
+  );
+  assert.equal(r.items[11].partialCalculation, false);
   assert.ok(r.reviews.some((review) => /Missing Cost/.test(review.reason)));
-  assert.ok(r.reviews.some((review) => /Unknown payment/.test(review.reason)));
   assert.deepEqual(r.branchDateSummary, [
     {
       date: '2026-10-01',
       branch: 'ASUS',
-      sales: '60000.00',
-      totalCost: '50000.00',
-      adjustment: '2100.00',
-      grossMargin: '7900.00',
+      sales: '90000.00',
+      totalCost: '75000.00',
+      adjustment: '2800.00',
+      grossMargin: '12200.00',
     },
   ]);
 });
@@ -1970,7 +2020,7 @@ test('Sheet 2 uses configured aliases, patterns, installment spacing, debit and 
       grossMargin: '71.65',
     },
   ]);
-  assert.equal(r.items[4].adjustment, null);
+  assert.equal(r.items[4].adjustment, '0.00');
   assert.deepEqual(run(rows.slice(0, 2)).branchDateSummary, [], 'Transfers require configuration');
   assert.deepEqual(
     calc.calculate([sale()], config.validate({ ...c(), paymentMethods: [], aliases: [] }))
@@ -2047,9 +2097,13 @@ test('Empty Sheet 2 retains its heading, six columns and zero totals', async () 
   assert.deepEqual(r.branchDateSummary, []);
   const b = new ExcelJS.Workbook();
   await b.xlsx.load((await exporter.report(r)) as any);
-  assert.equal(b.worksheets[0].rowCount, 1, 'No matched items leaves only Sheet 1 headers');
-  assert.equal(b.worksheets[0].columnCount, 17);
-  assert.equal(b.getWorksheet('Needs Review')!.rowCount, 2, 'Unknown payment remains reviewable');
+  assert.equal(b.worksheets[0].rowCount, 1, 'Unmatched payments move to Needs Review');
+  assert.equal(b.worksheets[0].columnCount, 19);
+  assert.equal(
+    b.getWorksheet('Needs Review')!.rowCount,
+    3,
+    'Both Cash and unconfigured methods remain available for review',
+  );
   const ws = b.getWorksheet(BRANCH_DATE_SUMMARY_SHEET)!;
   assert.equal(ws.columnCount, 6);
   assert.equal(ws.rowCount, 3);
@@ -2061,7 +2115,7 @@ test('Empty Sheet 2 retains its heading, six columns and zero totals', async () 
   assert.equal(ws.autoFilter, 'A2:F2');
   for (const col of [3, 4, 5, 6]) assert.equal(ws.getCell(3, col).value, 0);
 });
-test('Only configured Tender items appear in Sheet 1, preserving source order, reviews and totals', async () => {
+test('Configured payment items appear in Sheet 1, preserving source order, reviews and totals', async () => {
   const cfg = c();
   cfg.aliases.push({ alias: 'Terminal A', cardName: 'BDO 3 MOS' });
   cfg.patterns.push({ pattern: 'Terminal B *', cardName: 'BPI 3 MOS' });
@@ -2102,26 +2156,24 @@ test('Only configured Tender items appear in Sheet 1, preserving source order, r
   assert.equal(r.items.length, variants.length, 'Source audit retains all processed items');
   assert.equal(r.summary.processedItems, variants.length);
   assert.equal(main.rowCount, expected.length + 1);
-  assert.equal(main.columnCount, 17);
+  assert.equal(main.columnCount, 19);
   for (const [i, item] of expected.entries()) {
     const row = main.getRow(i + 2);
     assert.equal(row.getCell(1).value, item.productId);
     assert.equal(row.getCell(11).value, item.originalPaymentMethod);
-    assert.equal(row.getCell(15).value, item.sourceRow);
-    assert.equal(row.getCell(16).value, item.cardName);
-    assert.equal(row.getCell(13).value, item.adjustment === null ? null : Number(item.adjustment));
+    assert.equal(row.getCell(17).value, item.sourceRow);
+    assert.equal(row.getCell(18).value, item.cardName);
+    assert.equal(row.getCell(15).value, item.adjustment === null ? null : Number(item.adjustment));
     assert.equal(row.getCell(8).value, item.totalCost === null ? null : Number(item.totalCost));
-    assert.match(
-      String(row.getCell(17).value),
-      i < 6 ? /Included in Sheet 2:/ : /Excluded from Sheet 2:/,
-    );
+    if (item.cardName)
+      assert.match(String(row.getCell(19).value), /(?:Included in|Excluded from) Sheet 2:/);
   }
   assert.deepEqual(
     (b.getWorksheet('Needs Review')!.getColumn(1).values as string[]).slice(2),
-    ['ITEM-2', 'ITEM-4', 'ITEM-9', 'ITEM-11', 'ITEM-12'],
+    ['=OMITTED-CASH', 'ITEM-2', 'ITEM-4', 'ITEM-9', 'ITEM-10', 'ITEM-12'],
     'Missing/unconfigured payment items are still available for review',
   );
-  const complete = expected.slice(0, 6);
+  const complete = [1, 3, 5, 6, 7, 8, 11].map((i) => r.items[i]);
   for (const key of ['sales', 'totalCost', 'adjustment', 'grossMargin'] as const) {
     assert.equal(
       r.branchDateSummary[0][key],
@@ -2136,7 +2188,7 @@ test('Only configured Tender items appear in Sheet 1, preserving source order, r
   assert.deepEqual(r, snapshot, 'Report filtering does not change calculations or configuration');
 });
 
-test('Exact 17-column four-sheet export, Product ID in A as text, dates, values and style', async () => {
+test('Exact 19-column four-sheet export, Product ID in A as text, dates, values and style', async () => {
   const r = run(parse(reportFixture())),
     b = new ExcelJS.Workbook();
   await b.xlsx.load((await exporter.report(r)) as any);
@@ -2145,7 +2197,7 @@ test('Exact 17-column four-sheet export, Product ID in A as text, dates, values 
     ['Item Bank Deductions', BRANCH_DATE_SUMMARY_SHEET, 'Configuration Settings', 'Needs Review'],
   );
   const ws = b.worksheets[0];
-  assert.equal(ws.columnCount, 17);
+  assert.equal(ws.columnCount, 19);
   assert.deepEqual(
     (ws.getRow(1).values as string[]).slice(1),
     ITEM_COLUMNS.map((c) => c.header),
@@ -2154,9 +2206,9 @@ test('Exact 17-column four-sheet export, Product ID in A as text, dates, values 
   assert.equal(ws.getCell('A2').value, '000123');
   assert.equal(ws.getCell('A2').numFmt, '@');
   assert.equal(ws.getCell('A2').type, ExcelJS.ValueType.String);
-  assert.equal(ws.getCell('M2').value, 1050);
-  assert.equal(ws.getCell('N2').value, 3950);
-  assert.equal(ws.getCell('O2').value, 2);
+  assert.equal(ws.getCell('O2').value, 1050);
+  assert.equal(ws.getCell('P2').value, 3950);
+  assert.equal(ws.getCell('Q2').value, 2);
   assert.equal((ws.getCell('B2').value as Date).toISOString(), '2026-10-01T00:00:00.000Z');
   assert.equal(ws.views[0].state, 'frozen');
   assert.ok(ws.autoFilter);
@@ -2168,8 +2220,8 @@ test('Missing cost stays blank in export; source identifiers and formula-like te
   assert.equal(b.worksheets[0].getCell('A2').value, '=SKU');
   assert.equal(b.worksheets[0].getCell('A2').type, ExcelJS.ValueType.String);
   assert.equal(typeof b.worksheets[0].getCell('E2').value, 'string');
-  assert.equal(b.worksheets[0].getCell('N2').value, null);
-  assert.equal(b.worksheets[0].getCell('M2').value, 1050);
+  assert.equal(b.worksheets[0].getCell('P2').value, null);
+  assert.equal(b.worksheets[0].getCell('O2').value, 1050);
 });
 test('Edited configuration and negative subsidy rates round-trip from Excel', async () => {
   const cfg = c();
@@ -2231,8 +2283,10 @@ test('Sheet 1 copies Payment verbatim, labels configured names Tender and omits 
     'Discount',
     'Line Total',
     'Payment',
-    'Applied Bank Rate',
-    'Bank Charges / Subsidy',
+    'Applied Bank Rate 1',
+    'Applied Bank Rate 2',
+    'Applied Bank Rate 3',
+    'Total Bank Charges / Subsidy',
     'GrossMargin',
     'Sales Source Row',
     'Tender',
@@ -2240,8 +2294,8 @@ test('Sheet 1 copies Payment verbatim, labels configured names Tender and omits 
   ]);
   assert.equal(ws.getCell('K2').value, original);
   assert.equal(ws.getCell('K2').type, ExcelJS.ValueType.String);
-  assert.equal(ws.getCell('P2').value, 'BDO 3 MOS');
-  assert.equal(ws.columnCount, 17);
+  assert.equal(ws.getCell('R2').value, 'BDO 3 MOS');
+  assert.equal(ws.columnCount, 19);
 });
 
 test('Four-column settings preserve custom bank links, aliases, patterns and non-card methods', async () => {
@@ -2391,6 +2445,8 @@ test('One-file HTTP workflow previews, calculates, downloads and imports its con
     await app.close();
   }
 });
+tests.push(...paymentTests);
+tests.push(...sourceIntegrityTests);
 async function main() {
   let passed = 0;
   for (const t of tests) {

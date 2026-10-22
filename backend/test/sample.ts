@@ -37,6 +37,7 @@ async function main() {
   const selection = { sheet: s.name, headerRow: s.headerRow, mapping: s.suggestedMapping };
   const sales = excel.parse(file, selection),
     result = calc.calculate(sales, config.defaults());
+  assert.equal(s.recordCount, sales.length, 'Preview and import retain the same source rows');
   assert.equal(result.items.length, sales.length);
   assert.equal(result.summary.processedItems, sales.length);
   assert.deepEqual(
@@ -66,9 +67,10 @@ async function main() {
   if (cashRow?.originalPaymentMethod === 'Cash 27,100.00') {
     assert.equal(cashRow.cardName, '');
     assert.equal(cashRow.appliedRate, null);
-    assert.equal(cashRow.adjustment, '0.00');
+    assert.equal(cashRow.adjustment, null);
     assert.equal(cashRow.grossMargin, null);
     assert.doesNotMatch(cashRow.explanation, /Gross Margin =/);
+    assert.ok(result.reviews.some((review) => review.sourceRow === cashRow.sourceRow));
   }
   const sum = (values: string[]) => values.reduce((a, b) => a.plus(b), new Decimal(0)).toFixed(2);
   assert.equal(
@@ -88,8 +90,22 @@ async function main() {
     result.summary.sales,
   );
   for (const [index, item] of result.items.entries()) {
-    assert.equal(item.productId, sales[index].productId);
-    assert.equal(item.originalPaymentMethod, sales[index].payment);
+    const row = sales[index];
+    for (const key of [
+      'productId',
+      'branch',
+      'invoice',
+      'product',
+      'quantity',
+      'price',
+      'cost',
+      'discount',
+      'lineTotal',
+    ] as const)
+      assert.equal(item[key], row[key], 'Calculated ' + key + ' at source row ' + row.source.row);
+    assert.equal(item.salesDate, row.date);
+    assert.equal(item.originalPaymentMethod, row.original.payment ?? row.payment);
+    assert.deepEqual(item.source, row.source);
     if (!item.cardName) {
       assert.equal(item.appliedRate, null, 'No Tender means no calculated rate');
       assert.ok(
@@ -125,17 +141,22 @@ async function main() {
     const original = new ExcelJS.Workbook();
     await original.xlsx.load(file.buffer as any);
     const ws = original.getWorksheet(s.name)!;
-    let rows = 0;
+    const sourceRows: number[] = [];
     ws.eachRow((r, n) => {
-      if (n > s.headerRow && r.hasValues) rows++;
+      if (n > s.headerRow && r.hasValues) sourceRows.push(n);
     });
-    assert.equal(rows, sales.length, 'Every original source row retained');
+    assert.deepEqual(
+      sourceRows,
+      sales.map((row) => row.source.row),
+      'Every original source row retained once, in source order',
+    );
     const value = (address: string) => {
       const c = ws.getCell(address);
       return c.type === ExcelJS.ValueType.Formula ? c.result : c.value;
     };
     for (const [index, row] of sales.entries()) {
       const item = result.items[index];
+      assert.equal(item.branch, row.branch, 'Calculated branch at source row ' + row.source.row);
       for (const key of ['productId', 'invoice', 'product', 'branch', 'payment'] as const) {
         if (row.cells[key]) {
           const raw = value(row.cells[key]);
@@ -151,12 +172,27 @@ async function main() {
         }
       }
       for (const key of ['quantity', 'price', 'cost', 'discount', 'lineTotal'] as const) {
-        if (row.cells[key] && value(row.cells[key]) !== null)
+        if (row.cells[key] && value(row.cells[key]) !== null) {
+          const raw = String(value(row.cells[key]));
           assert.equal(
-            new Decimal(String(value(row.cells[key]))).toFixed(2),
+            row.original[key],
+            raw,
+            'Original numeric cell retained at ' + row.cells[key],
+          );
+          // Quantity must stay exact. Money may differ only by the documented
+          // Excel binary storage noise tolerance, never a real fraction of a cent.
+          assert.ok(
+            new Decimal(raw)
+              .minus(row[key])
+              .abs()
+              .lte(key === 'quantity' ? 0 : '0.00000001'),
+          );
+          assert.equal(
+            new Decimal(raw).toFixed(2),
             new Decimal(row[key]).toFixed(2),
             'Original ' + key + ' at source row ' + row.source.row,
           );
+        }
       }
       if (row.cells.date) {
         const raw = value(row.cells.date);
@@ -174,7 +210,9 @@ async function main() {
         );
       }
     }
-    // Independently verify aggregate payment fees for each resolved invoice using literal source groups.
+    // Independently verify aggregate fees from the original ExcelJS Payment cells.
+    // The reference report writes cents explicitly; this separate reader must not
+    // use a combined Tender amount when Payment supplies individual bank amounts.
     const groups = new Map<string, number[]>();
     sales.forEach((row, index) => {
       const key = JSON.stringify([row.invoice, row.branch, row.date]);
@@ -186,9 +224,17 @@ async function main() {
     for (const indices of groups.values()) {
       if (indices.some((i) => result.items[i].adjustment === null)) continue;
       const row = sales[indices[0]];
-      if (!row.payments.length) continue;
+      const paymentText = row.cells.payment ? String(value(row.cells.payment) ?? '') : '';
+      const literalPayments = [
+        ...paymentText.matchAll(/(.*?)\s+(?:(?:PHP|₱)\s*)?(\d+(?:,\d{3})*\.\d{2})(?=\s|$)/gis),
+      ].map((match) => ({
+        method: match[1].trim().replace(/^(?:CC|CARD)\s*#\s*\S+\s*/i, ''),
+        amount: match[2].replace(/,/g, ''),
+      }));
+      const paymentEvidence = literalPayments.length ? literalPayments : row.payments;
+      if (!paymentEvidence.length) continue;
       let independentFee = new Decimal(0);
-      for (const part of row.payments) {
+      for (const part of paymentEvidence) {
         const literal = part.method
           .toUpperCase()
           .replace(/\b(?:BNPL|SNPL)\b/g, ' ')
@@ -207,13 +253,7 @@ async function main() {
               literal === m.name.toUpperCase() || literal.startsWith(m.name.toUpperCase() + ' '),
           )
           .sort((a, b) => b.name.length - a.name.length)[0]?.method;
-        if (!matched || /\b(PROMO|PROMOTIONAL)\b/.test(literal)) {
-          assert.ok(
-            indices.every((i) => result.items[i].partialCalculation),
-            'Unconfigured parts only occur in partial calculations',
-          );
-          continue;
-        }
+        if (!matched || /\b(PROMO|PROMOTIONAL)\b/.test(literal)) continue;
         independentFee = independentFee.plus(
           new Decimal(part.amount)
             .times(matched.rate)
@@ -224,7 +264,7 @@ async function main() {
       assert.equal(
         sum(indices.map((i) => result.items[i].adjustment!)),
         independentFee.toFixed(2),
-        'Independent invoice payment fee',
+        'Independent invoice Payment fee for ' + row.invoice,
       );
       verifiedInvoices++;
     }
@@ -283,18 +323,44 @@ async function main() {
     ]);
   }
   const main = book.worksheets[0];
-  assert.equal(main.columnCount, 17);
+  assert.equal(main.columnCount, 19);
   assert.deepEqual(
     (main.getRow(1).values as string[]).slice(1),
     ITEM_COLUMNS.map((c) => c.header),
   );
   const exportedItems = result.items.filter(
-    (item) => item.cardName.trim() && !(Number(item.quantity) < 0),
+    (item) => item.cardName.trim() && !(Number(item.quantity) < 0) && !item.reviewOnly,
   );
+  for (const item of result.items.filter((item) => !exportedItems.includes(item)))
+    assert.ok(
+      result.reviews.some((review) => review.sourceRow === item.sourceRow),
+      'Every omitted source product remains in Needs Review',
+    );
   assert.equal(main.rowCount, exportedItems.length + 1);
   for (const [index, item] of exportedItems.entries()) {
+    for (const [columnIndex, column] of ITEM_COLUMNS.entries()) {
+      const raw = item[column.key];
+      let expected: unknown = raw;
+      if (column.format === 'date') expected = raw ? new Date(raw + 'T00:00:00.000Z') : null;
+      else if (column.format === 'percent')
+        expected = raw === null ? null : new Decimal(raw).div(100).toNumber();
+      else if (column.format === 'money' && raw !== null)
+        expected = new Decimal(
+          String(raw)
+            .replace(/^(?:₱|PHP)\s*/i, '')
+            .replace(/,/g, ''),
+        ).toNumber();
+      else if (column.format === 'number') expected = Number(raw);
+      assert.deepEqual(
+        main.getCell(index + 2, columnIndex + 1).value,
+        expected,
+        'Exported ' + column.header + ' at source row ' + item.sourceRow,
+      );
+    }
     assert.equal(main.getCell(index + 2, 1).value, item.productId || '');
     assert.equal(main.getCell(index + 2, 1).type, ExcelJS.ValueType.String);
+    assert.equal(main.getCell(index + 2, 3).value, item.branch);
+    assert.equal(main.getCell(index + 2, 4).value, item.invoice);
     assert.equal(main.getCell(index + 2, 5).value, item.product);
     assert.equal(
       main.getCell(index + 2, 8).value,
@@ -303,16 +369,50 @@ async function main() {
     );
     assert.equal(main.getCell(index + 2, 11).value, item.originalPaymentMethod);
     assert.equal(
-      main.getCell(index + 2, 13).value,
+      main.getCell(index + 2, 15).value,
       item.adjustment === null ? null : Number(item.adjustment),
     );
     assert.equal(
-      main.getCell(index + 2, 14).value,
+      main.getCell(index + 2, 16).value,
       item.grossMargin === null ? null : Number(item.grossMargin),
     );
-    assert.equal(main.getCell(index + 2, 15).value, item.sourceRow);
-    assert.equal(main.getCell(index + 2, 16).value, item.cardName);
+    assert.equal(main.getCell(index + 2, 17).value, item.sourceRow);
+    assert.equal(main.getCell(index + 2, 18).value, item.cardName);
   }
+  const review = book.getWorksheet('Needs Review')!;
+  assert.equal(review.rowCount, result.reviews.length + 1);
+  const accountedRows = new Set(exportedItems.map((item) => item.sourceRow));
+  const reviewedRows = new Set<number>();
+  for (const [index, entry] of result.reviews.entries()) {
+    assert.ok(!reviewedRows.has(entry.sourceRow), 'Review rows are never duplicated');
+    reviewedRows.add(entry.sourceRow);
+    accountedRows.add(entry.sourceRow);
+    assert.deepEqual(
+      (review.getRow(index + 2).values as unknown[]).slice(1),
+      [
+        entry.productId,
+        entry.salesDate ? new Date(entry.salesDate + 'T00:00:00.000Z') : null,
+        entry.branch,
+        entry.invoice,
+        entry.product,
+        entry.sourceRow,
+        entry.status,
+        entry.reason,
+        `${entry.source.file} / ${entry.source.sheet} / row ${entry.source.row}`,
+        JSON.stringify(entry.original),
+      ],
+      'Review export at source row ' + entry.sourceRow,
+    );
+  }
+  assert.deepEqual(
+    [...accountedRows].sort((a, b) => a - b),
+    sales.map((row) => row.source.row),
+    'Every imported row appears in item details or Needs Review',
+  );
+  for (const sheet of book.worksheets)
+    sheet.eachRow((row) =>
+      row.eachCell((cell) => assert.notEqual(cell.type, ExcelJS.ValueType.Formula)),
+    );
   assert.deepEqual(exporter.import(upload(buffer)), result.configuration);
   const app = await createApplication(true);
   await app.init();
@@ -322,12 +422,33 @@ async function main() {
       .field('options', JSON.stringify({ sales: selection, configuration: config.defaults() }))
       .attach('sales', file.buffer, file.originalname)
       .expect(201);
+    assert.deepEqual(
+      response.body.result.items,
+      result.items,
+      'HTTP workflow retains every product field',
+    );
+    assert.deepEqual(response.body.result.reviews, result.reviews);
+    assert.deepEqual(response.body.result.branchDateSummary, result.branchDateSummary);
     assert.deepEqual(response.body.result.summary, result.summary);
-    await request(app.getHttpServer())
+    const download = await request(app.getHttpServer())
       .post('/api/excel/export')
       .send(response.body)
+      .buffer(true)
+      .parse((res, cb) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => cb(null, Buffer.concat(chunks)));
+      })
       .expect(201)
       .expect('Content-Type', /spreadsheetml/);
+    const downloaded = new ExcelJS.Workbook();
+    await downloaded.xlsx.load(download.body);
+    for (const name of ['Item Bank Deductions', BRANCH_DATE_SUMMARY_SHEET, 'Needs Review'])
+      assert.deepEqual(
+        downloaded.getWorksheet(name)!.getSheetValues(),
+        book.getWorksheet(name)!.getSheetValues(),
+        'HTTP export matches validated cells in ' + name,
+      );
   } finally {
     await app.close();
   }
@@ -338,6 +459,9 @@ async function main() {
       {
         sourceRows: sales.length,
         outputRows: result.items.length,
+        exportedItemRows: exportedItems.length,
+        exportedReviewRows: result.reviews.length,
+        accountedSourceRows: accountedRows.size,
         sourceDates: result.reportDates,
         costBasis: s.suggestedCostBasis,
         columns: main.columnCount,

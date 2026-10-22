@@ -38,6 +38,7 @@ export class ExcelExportService {
     rows: Record<string, unknown>[],
     totals: string[] = [],
     heading?: string,
+    literalText = false,
   ) {
     const headerRow = heading ? 2 : 1;
     const ws = book.addWorksheet(name, { views: [{ state: 'frozen', ySplit: headerRow }] });
@@ -55,7 +56,16 @@ export class ExcelExportService {
       ws.getCell('A1').alignment = { vertical: 'middle' };
     }
     rows.forEach((row) =>
-      ws.addRow(Object.fromEntries(Object.entries(row).map(([k, v]) => [k, safe(v)]))),
+      // ExcelJS writes strings as literal string cells; formulas require a
+      // formula object. Preserve report text exactly, including leading '='.
+      ws.addRow(
+        Object.fromEntries(
+          Object.entries(row).map(([k, v]) => [
+            k,
+            literalText && typeof v === 'string' ? v : safe(v),
+          ]),
+        ),
+      ),
     );
     ws.autoFilter = {
       from: { row: headerRow, column: 1 },
@@ -134,7 +144,11 @@ export class ExcelExportService {
         ws.getCell(i + 2, column).note = 'Ledger settings v2\n' + JSON.stringify(value);
       };
       if (c.paymentMethods[i])
-        note(1, { cardName: c.paymentMethods[i].cardName, bank: c.paymentMethods[i].bank });
+        note(1, {
+          cardName: c.paymentMethods[i].cardName,
+          bank: c.paymentMethods[i].bank,
+          branchRates: c.paymentMethods[i].branchRates,
+        });
       if (c.aliases[i]) note(2, { alias: c.aliases[i] });
       if (c.banks[i] || c.patterns[i])
         note(3, { bankReference: c.banks[i], pattern: c.patterns[i] });
@@ -292,7 +306,14 @@ export class ExcelExportService {
               text(0) +
               '" is missing. Add this method in the application and export its settings.',
           );
-        c.paymentMethods.push({ cardName: text(0), bank, rate });
+        c.paymentMethods.push({
+          cardName: text(0),
+          bank,
+          rate,
+          ...(notes[0].branchRates !== undefined
+            ? { branchRates: notes[0].branchRates as Record<string, string> }
+            : {}),
+        });
         if (typeof notes[0].cardName === 'string')
           renamedCards.set(key(notes[0].cardName), text(0));
       }
@@ -375,9 +396,18 @@ export class ExcelExportService {
           i.appliedRate !== null && /^-?\d+(\.\d+)?$/.test(i.appliedRate)
             ? new Decimal(i.appliedRate).div(100).toNumber()
             : i.appliedRate,
+        ...Object.fromEntries(
+          ['appliedRate1', 'appliedRate2', 'appliedRate3'].map((key) => {
+            const value = i[key as 'appliedRate1' | 'appliedRate2' | 'appliedRate3'];
+            return [key, value === null ? null : new Decimal(value).div(100).toNumber()];
+          }),
+        ),
         adjustment: numeric(i.adjustment),
         grossMargin: numeric(i.grossMargin),
       })),
+      [],
+      undefined,
+      true,
     );
     // An explicit Excel string cell is inert even when an identifier starts with '='.
     // Preserve the actual identifier rather than adding a visible apostrophe to it.
@@ -387,6 +417,13 @@ export class ExcelExportService {
       // Copy source Payment verbatim into a literal string cell, including line breaks.
       ws.getCell(n + 2, ws.getColumn('originalPaymentMethod').number).value =
         i.originalPaymentMethod;
+      // Keep the payment and allocation explanation beside the monetary result,
+      // so a zero-value gift's fee can be understood without scrolling to column S.
+      ws.getCell(n + 2, ws.getColumn('adjustment').number).note = i.explanation;
+      for (const key of ['appliedRate1', 'appliedRate2', 'appliedRate3'] as const)
+        if (i[key] !== null)
+          ws.getCell(n + 2, ws.getColumn(key).number).note =
+            'Configured rate for an actual customer payment on this invoice. This product receives only its allocated share of the resulting charge. See the Total Bank Charges / Subsidy cell note or Calculation Explanation for the payment amount and allocation.';
       ws.getCell(n + 2, ws.getColumn('totalCost').number).note =
         'Original source Cost: ' +
         JSON.stringify(i.cost) +
@@ -400,9 +437,9 @@ export class ExcelExportService {
     ws.getCell(1, ws.getColumn('cardName').number).note =
       'Recognized configured card names from Sales Report payment details. BNPL/SNPL labels are ignored unless explicitly configured; original Payment text is preserved. A name remains visible when another payment or source value needs review; it does not mean the bank charge has been calculated. See Calculation Explanation.';
     ws.getCell(1, ws.getColumn('adjustment').number).note =
-      'Positive = bank charge; negative = subsidy. Only items with a configured bank payment match appear on this sheet. Negative-quantity items are moved to Needs Review and excluded from summary totals. Cash-only, other no-charge-only and unmatched rows are omitted. Unresolved calculations remain blank. In a split, only the matched card portion receives a bank charge. When another payment method is unconfigured, only matched-method charges are shown; see Calculation Explanation. Partial rows are excluded from confirmed totals.';
+      'Positive = bank charge; negative = subsidy. Each actual Payment amount uses its own matched configured rate. Unconfigured methods receive zero charges. Invoice payments are deduplicated and rounded charges allocated by positive product Line Total. Zero Line Totals receive no allocation. Invalid or unreconciled payments stay blank with visible explanations. Negative quantities appear in Needs Review.';
     ws.getCell(1, ws.getColumn('grossMargin').number).note =
-      'Line Total minus total product cost and calculated bank charges/subsidies. Blank when no configured card matches, or cost/charges are unresolved. Provisional when another payment method remains unconfigured; see Calculation Explanation. Partial rows are excluded from confirmed totals.';
+      'Line Total minus total product cost and allocated signed payment-based charges/subsidies. Blank when no configured card matches or cost/charges are unresolved, preserving the existing margin rule.';
     const summary = this.table(
       book,
       BRANCH_DATE_SUMMARY_SHEET,
@@ -422,6 +459,7 @@ export class ExcelExportService {
       })),
       ['sales', 'totalCost', 'adjustment', 'grossMargin'],
       BRANCH_DATE_SUMMARY_TITLE,
+      true,
     );
     summary.getCell('C2').note =
       'Sum of net Line Total for fully calculated items with a configured bank payment, known total cost, date and branch. Negative-quantity items contribute no sales, cost, bank charges or gross margin and are shown in Needs Review. Cash-only, unmatched, partial and incomplete rows are excluded; see the original Sales Report and Needs Review. Reconciled splits retain the full product sales and cost, matching the existing individual gross margin. Missing Product ID warnings do not exclude valid calculations.';
@@ -453,6 +491,9 @@ export class ExcelExportService {
         source: source(r.source),
         original: JSON.stringify(r.original),
       })),
+      [],
+      undefined,
+      true,
     );
     const reviewSheet = book.getWorksheet('Needs Review')!;
     result.reviews.forEach((r, n) => {

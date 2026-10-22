@@ -70,6 +70,12 @@
         column below.
       </p>
     }
+    @if (ambiguousMappings.length) {
+      <p class="notice" role="alert">
+        Duplicate column headings need a choice: {{ ambiguousMappings.join(', ') }}. Select the
+        intended source column below.
+      </p>
+    }
     <details class="mapping" [open]="missing">
       <summary>
         {{ missing ? 'Map required columns to continue' : 'Column mapping detected' }}
